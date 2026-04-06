@@ -26,6 +26,7 @@ import { runHook, parseHookOutput } from '../utils/hook-test-helpers.js';
 // ─── Paths to both hook variants ────────────────────────────────────
 
 const CJS_HOOK = path.resolve(__dirname, '..', '..', 'hooks', 'claude', 'gitnexus-hook.cjs');
+const CODEX_HOOK = path.resolve(__dirname, '..', '..', 'hooks', 'codex', 'gitnexus-hook.cjs');
 const PLUGIN_HOOK = path.resolve(
   __dirname,
   '..',
@@ -75,6 +76,10 @@ function getHeadCommit(): string {
 describe('Hook files exist', () => {
   it('CJS hook exists', () => {
     expect(fs.existsSync(CJS_HOOK)).toBe(true);
+  });
+
+  it('Codex hook exists', () => {
+    expect(fs.existsSync(CODEX_HOOK)).toBe(true);
   });
 
   it('Plugin hook exists', () => {
@@ -182,6 +187,40 @@ describe('Dispatch map pattern', () => {
       expect(source).not.toMatch(/if\s*\(hookEvent\s*===\s*'PreToolUse'\)/);
     });
   }
+});
+
+describe('Codex hook isolation', () => {
+  it('Claude hook remains Claude-only and does not parse Codex tool_response payloads', () => {
+    const source = fs.readFileSync(CJS_HOOK, 'utf-8');
+    expect(source).toContain('GitNexus Claude Code Hook');
+    expect(source).not.toContain('tool_response');
+  });
+
+  it('Codex hook is PostToolUse-only and parses tool_response payloads', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    expect(source).toContain('GitNexus Codex Hook');
+    expect(source).toContain('tool_response');
+    expect(source).toContain('const handlers = {');
+    expect(source).toContain('PostToolUse: handlePostToolUse');
+    expect(source).not.toContain('PreToolUse: handlePreToolUse');
+  });
+
+  it('Codex hook has no shell: true in spawnSync calls', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith('//') || line.trim().startsWith('*')) continue;
+      if (/shell:\s*(true|isWin)/.test(line)) {
+        throw new Error(`Codex hook line ${i + 1} has shell injection risk: ${line.trim()}`);
+      }
+    }
+  });
+
+  it('Codex hook uses .cmd extension for Windows npx', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    expect(source).toContain('npx.cmd');
+  });
 });
 
 // ─── Source code regression: debug error truncation ──────────────────
@@ -440,17 +479,17 @@ describe('PostToolUse staleness detection (integration)', () => {
 });
 
 describe('PostToolUse Codex payload support (integration)', () => {
-  it('CJS hook parses Codex tool_response JSON strings', () => {
+  it('Codex hook parses Codex tool_response JSON strings', () => {
     fs.writeFileSync(
       path.join(gitNexusDir, 'meta.json'),
       JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
     );
 
-    const result = runHook(CJS_HOOK, {
+    const result = runHook(CODEX_HOOK, {
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command: 'git commit -m "test"' },
-      tool_response: JSON.stringify({ exit_code: 0 }),
+      tool_response: JSON.stringify({ exitCode: 0 }),
       cwd: tmpDir,
     });
 
@@ -460,15 +499,47 @@ describe('PostToolUse Codex payload support (integration)', () => {
     expect(output!.additionalContext).toContain('stale');
   });
 
-  it('CJS hook ignores failed Codex tool_response payloads', () => {
-    const result = runHook(CJS_HOOK, {
+  it('Codex hook ignores failed Codex tool_response payloads', () => {
+    const result = runHook(CODEX_HOOK, {
       hook_event_name: 'PostToolUse',
       tool_name: 'Bash',
       tool_input: { command: 'git commit -m "fail"' },
-      tool_response: JSON.stringify({ exit_code: 1 }),
+      tool_response: JSON.stringify({ exitCode: 1 }),
       cwd: tmpDir,
     });
 
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook still emits stale warnings for mixed search + git commands', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'rg dummy && git commit -m "test"' },
+      tool_response: JSON.stringify({ exitCode: 0 }),
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.additionalContext).toContain('stale');
+  });
+});
+
+describe('Codex cwd validation (integration)', () => {
+  it('Codex hook is silent when cwd is relative', () => {
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: JSON.stringify({ exitCode: 0 }),
+      cwd: 'relative/path',
+    });
     expect(result.stdout.trim()).toBe('');
   });
 });

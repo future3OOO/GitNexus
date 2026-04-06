@@ -201,8 +201,11 @@ ${GITNEXUS_END_MARKER}`;
  * Copy the bundled GitNexus hook script into a per-agent hooks directory.
  * Returns the absolute destination path.
  */
-async function installBundledHookScript(destHooksDir: string): Promise<string> {
-  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', 'claude');
+async function installBundledHookScript(
+  destHooksDir: string,
+  hookVariant: 'claude' | 'codex',
+): Promise<string> {
+  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', hookVariant);
   const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
   const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
 
@@ -237,7 +240,7 @@ function ensureCommandHookEntry(
   statusMessage: string,
 ) {
   if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
-  if (!existing.hooks[eventName]) existing.hooks[eventName] = [];
+  if (!Array.isArray(existing.hooks[eventName])) existing.hooks[eventName] = [];
 
   const hasHook = existing.hooks[eventName].some((entry: HookEntry) => {
     const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
@@ -336,7 +339,7 @@ async function installClaudeCodeHooks(result: SetupResult): Promise<void> {
   const destHooksDir = path.join(claudeDir, 'hooks', 'gitnexus');
 
   try {
-    const hookPath = (await installBundledHookScript(destHooksDir)).replace(/\\/g, '/');
+    const hookPath = (await installBundledHookScript(destHooksDir, 'claude')).replace(/\\/g, '/');
     const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
 
     // Merge hook config into ~/.claude/settings.json
@@ -403,6 +406,7 @@ function upsertTomlKey(content: string, sectionName: string, key: string, value:
     `(^|\\n)\\[${escapeRegExp(sectionName)}\\]\\n([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`,
   );
   const keyRegex = new RegExp(`^${escapeRegExp(key)}\\s*=`, 'm');
+  const keyLineRegex = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=.*$`, 'm');
   const line = `${key} = ${value}`;
 
   if (!content.trim()) {
@@ -414,7 +418,12 @@ function upsertTomlKey(content: string, sectionName: string, key: string, value:
   }
 
   return content.replace(sectionRegex, (fullMatch, prefix, body) => {
-    if (keyRegex.test(body)) return fullMatch;
+    if (keyRegex.test(body)) {
+      const replacedBody = body.replace(keyLineRegex, line);
+      const normalizedBody =
+        replacedBody.endsWith('\n') || replacedBody.length === 0 ? replacedBody : `${replacedBody}\n`;
+      return `${prefix}[${sectionName}]\n${normalizedBody}`;
+    }
     const normalizedBody = body.endsWith('\n') || body.length === 0 ? body : `${body}\n`;
     return `${prefix}[${sectionName}]\n${normalizedBody}${line}\n`;
   });
@@ -481,7 +490,7 @@ async function installCodexHooks(result: SetupResult): Promise<void> {
   const destHooksDir = path.join(codexDir, 'hooks', 'gitnexus');
 
   try {
-    const hookPath = (await installBundledHookScript(destHooksDir)).replace(/\\/g, '/');
+    const hookPath = (await installBundledHookScript(destHooksDir, 'codex')).replace(/\\/g, '/');
     const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
     const existing = (await readJsonFile(hooksPath)) || {};
 

@@ -81,6 +81,11 @@ describe('setupCommand codex execution', () => {
     await expect(
       fs.access(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs')),
     ).resolves.toBeUndefined();
+    const installedHook = await fs.readFile(
+      path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs'),
+      'utf-8',
+    );
+    expect(installedHook).toContain('GitNexus Codex Hook');
 
     const agentsContent = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
     expect(agentsContent).toContain('<!-- gitnexus:start -->');
@@ -122,5 +127,37 @@ describe('setupCommand codex execution', () => {
 
     expect(execFileMock).not.toHaveBeenCalled();
     await expect(fs.access(path.join(tempHome, '.agents', 'skills'))).rejects.toThrow();
+  });
+
+  it('overwrites codex_hooks = false when hooks are installed', async () => {
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'config.toml'),
+      '[features]\ncodex_hooks = false\n',
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await setupCommand();
+
+    const codexConfig = await fs.readFile(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(codexConfig).toContain('codex_hooks = true');
+    expect(codexConfig).not.toContain('codex_hooks = false');
+  });
+
+  it('repairs malformed hook buckets instead of throwing', async () => {
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'hooks.json'),
+      JSON.stringify({ hooks: { PostToolUse: {} } }, null, 2),
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await setupCommand();
+
+    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    expect(Array.isArray(hooksJson.hooks.PostToolUse)).toBe(true);
+    expect(hooksJson.hooks.PostToolUse[0].matcher).toBe('Bash');
   });
 });

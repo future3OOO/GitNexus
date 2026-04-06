@@ -1,18 +1,13 @@
 #!/usr/bin/env node
 /**
- * GitNexus Agent Hook
+ * GitNexus Claude Code Hook
  *
- * Claude Code:
- * - PreToolUse  — intercepts Grep/Glob/Bash searches and augments
- *                 with graph context from the GitNexus index.
- * - PostToolUse — detects stale index after git mutations and notifies
- *                 the agent to reindex.
+ * PreToolUse  — intercepts Grep/Glob/Bash searches and augments
+ *               with graph context from the GitNexus index.
+ * PostToolUse — detects stale index after git mutations and notifies
+ *               the agent to reindex.
  *
- * Codex:
- * - PostToolUse — augments Bash search commands with graph context and
- *                 detects stale index after git mutations.
- *
- * NOTE: SessionStart hooks are broken on Windows for Claude Code.
+ * NOTE: SessionStart hooks are broken on Windows (Claude Code bug).
  * Session context is injected via CLAUDE.md / skills instead.
  */
 
@@ -104,34 +99,6 @@ function extractPattern(toolName, toolInput) {
   }
 
   return null;
-}
-
-/**
- * Parse Bash tool result payloads across agents.
- *
- * Claude Code provides `tool_output`.
- * Codex currently provides `tool_response`, usually as a JSON string.
- */
-function extractBashResult(input) {
-  const direct = input.tool_output;
-  if (direct && typeof direct === 'object') return direct;
-
-  const response = input.tool_response;
-  if (response && typeof response === 'object') return response;
-  if (typeof response !== 'string' || !response.trim()) return null;
-
-  try {
-    return JSON.parse(response);
-  } catch {
-    return null;
-  }
-}
-
-function isSuccessfulBashResult(result) {
-  if (!result || typeof result !== 'object') return true;
-  if (typeof result.exit_code === 'number') return result.exit_code === 0;
-  if (typeof result.exitCode === 'number') return result.exitCode === 0;
-  return true;
 }
 
 /**
@@ -232,35 +199,16 @@ function handlePostToolUse(input) {
   if (toolName !== 'Bash') return;
 
   const command = (input.tool_input || {}).command || '';
+  if (!/\bgit\s+(commit|merge|rebase|cherry-pick|pull)(\s|$)/.test(command)) return;
+
+  // Only proceed if the command succeeded
+  const toolOutput = input.tool_output || {};
+  if (toolOutput.exit_code !== undefined && toolOutput.exit_code !== 0) return;
+
   const cwd = input.cwd || process.cwd();
   if (!path.isAbsolute(cwd)) return;
   const gitNexusDir = findGitNexusDir(cwd);
   if (!gitNexusDir) return;
-  const bashResult = extractBashResult(input);
-
-  // Codex currently exposes Bash hooks only, so search enrichment is done
-  // post-command rather than pre-command. Claude Code still benefits from the
-  // PreToolUse path above.
-  const searchPattern = extractPattern('Bash', { command });
-  if (searchPattern) {
-    const cliPath = resolveCliPath();
-    let result = '';
-    try {
-      const child = runGitNexusCli(cliPath, ['augment', '--', searchPattern], cwd, 7000);
-      if (!child.error && child.status === 0) {
-        result = child.stderr || '';
-      }
-    } catch {
-      /* graceful failure */
-    }
-    if (result && result.trim()) {
-      sendHookResponse('PostToolUse', result.trim());
-      return;
-    }
-  }
-
-  if (!/\bgit\s+(commit|merge|rebase|cherry-pick|pull)(\s|$)/.test(command)) return;
-  if (!isSuccessfulBashResult(bashResult)) return;
 
   // Compare HEAD against last indexed commit — skip if unchanged
   let currentHead = '';
