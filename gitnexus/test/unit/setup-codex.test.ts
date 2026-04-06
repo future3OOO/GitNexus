@@ -81,6 +81,11 @@ describe('setupCommand codex execution', () => {
     await expect(
       fs.access(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs')),
     ).resolves.toBeUndefined();
+
+    const agentsContent = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
+    expect(agentsContent).toContain('<!-- gitnexus:start -->');
+    expect(agentsContent).toContain('~/.agents/skills/gitnexus-exploring/SKILL.md');
+    expect(agentsContent).toContain('~/.codex/hooks.json');
   });
 
   it('invokes codex mcp add without shell on non-Windows and still enables global Codex hooks', async () => {
@@ -103,6 +108,9 @@ describe('setupCommand codex execution', () => {
 
     const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
     expect(hooksJson.hooks.PostToolUse[0].matcher).toBe('Bash');
+
+    const agentsContent = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
+    expect(agentsContent).toContain('GitNexus — Global Workflow');
   });
 
   it('skips Codex setup entirely when ~/.codex is missing', async () => {

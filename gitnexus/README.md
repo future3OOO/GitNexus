@@ -68,9 +68,10 @@ codex mcp add gitnexus -- npx -y gitnexus@latest mcp
 
 `gitnexus setup` also enables `features.codex_hooks = true`, installs a global
 `~/.codex/hooks.json`, and copies the GitNexus hook script into
-`~/.codex/hooks/gitnexus/`. Current Codex hooks can enrich Bash-based search
-commands (for example `rg` / `grep`) and warn when git mutations make the index
-stale.
+`~/.codex/hooks/gitnexus/`. It also installs a GitNexus section into the global
+`~/.codex/AGENTS.md` so Codex has persistent workflow guidance and skill
+references. Current Codex hooks can enrich Bash-based search commands (for
+example `rg` / `grep`) and warn when git mutations make the index stale.
 
 ### Cursor / Windsurf
 

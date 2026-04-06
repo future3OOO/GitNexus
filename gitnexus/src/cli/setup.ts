@@ -25,6 +25,9 @@ interface SetupResult {
   errors: string[];
 }
 
+const GITNEXUS_START_MARKER = '<!-- gitnexus:start -->';
+const GITNEXUS_END_MARKER = '<!-- gitnexus:end -->';
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -112,6 +115,86 @@ async function readJsonFile(filePath: string): Promise<any | null> {
 async function writeJsonFile(filePath: string, data: any): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function upsertMarkedSection(
+  filePath: string,
+  content: string,
+): Promise<'created' | 'updated' | 'appended'> {
+  if (!(await fileExists(filePath))) {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, `${content.trimEnd()}\n`, 'utf-8');
+    return 'created';
+  }
+
+  const existingContent = await fs.readFile(filePath, 'utf-8');
+  const startIdx = existingContent.indexOf(GITNEXUS_START_MARKER);
+  const endIdx = existingContent.indexOf(GITNEXUS_END_MARKER);
+
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    const before = existingContent.substring(0, startIdx);
+    const after = existingContent.substring(endIdx + GITNEXUS_END_MARKER.length);
+    const nextContent = `${before}${content}${after}`.trimEnd() + '\n';
+    await fs.writeFile(filePath, nextContent, 'utf-8');
+    return 'updated';
+  }
+
+  const nextContent = `${existingContent.trimEnd()}\n\n${content.trimEnd()}\n`;
+  await fs.writeFile(filePath, nextContent, 'utf-8');
+  return 'appended';
+}
+
+function generateCodexAgentsContent(): string {
+  return `${GITNEXUS_START_MARKER}
+# GitNexus — Global Workflow
+
+When you are inside an indexed repository, use GitNexus to understand structure, blast radius, and execution flow before making changes.
+
+## Search Flow
+
+- Prefer fast search first:
+  - Use \`fff\` MCP tools when available for raw file/content search
+  - Otherwise use Bash \`rg\`, \`grep\`, or \`find\`
+- After locating the symbol or file, switch to GitNexus for meaning and safety:
+  - \`gitnexus_query({query: "concept"})\` for architecture and execution flows
+  - \`gitnexus_context({name: "symbol"})\` for callers/callees and process participation
+  - \`gitnexus_impact({target: "symbol", direction: "upstream"})\` before editing
+
+## Hooks
+
+- A global Codex Bash hook is installed in \`~/.codex/hooks.json\`
+- Bash search commands can be enriched with GitNexus context automatically
+- Bash git mutations can warn when the GitNexus index is stale
+- Native MCP tools like \`fff\` are not hooked directly, so use the search flow above
+
+## Skills
+
+| Task | Read this skill file |
+|------|----------------------|
+| Understand architecture / "How does X work?" | \`~/.agents/skills/gitnexus-exploring/SKILL.md\` |
+| Blast radius / "What breaks if I change X?" | \`~/.agents/skills/gitnexus-impact-analysis/SKILL.md\` |
+| Trace bugs / "Why is X failing?" | \`~/.agents/skills/gitnexus-debugging/SKILL.md\` |
+| Rename / extract / split / refactor | \`~/.agents/skills/gitnexus-refactoring/SKILL.md\` |
+| Tools, resources, schema reference | \`~/.agents/skills/gitnexus-guide/SKILL.md\` |
+| Index, status, clean, wiki CLI commands | \`~/.agents/skills/gitnexus-cli/SKILL.md\` |
+| Review pull requests | \`~/.agents/skills/gitnexus-pr-review/SKILL.md\` |
+
+## Rules
+
+- Always run impact analysis before editing a symbol in an indexed repo
+- Run \`gitnexus_detect_changes()\` before committing when GitNexus MCP is available
+- Reindex after structural changes or git mutations when warned by the hook
+
+${GITNEXUS_END_MARKER}`;
 }
 
 /**
@@ -418,6 +501,20 @@ async function installCodexHooks(result: SetupResult): Promise<void> {
   }
 }
 
+async function installCodexAgentsFile(result: SetupResult): Promise<void> {
+  const codexDir = path.join(os.homedir(), '.codex');
+  if (!(await dirExists(codexDir))) return;
+
+  const agentsPath = path.join(codexDir, 'AGENTS.md');
+
+  try {
+    const action = await upsertMarkedSection(agentsPath, generateCodexAgentsContent());
+    result.configured.push(`Codex AGENTS.md (${action} → ~/.codex/AGENTS.md)`);
+  } catch (err: any) {
+    result.errors.push(`Codex AGENTS.md: ${err.message}`);
+  }
+}
+
 // ─── Skill Installation ───────────────────────────────────────────
 
 /**
@@ -583,6 +680,7 @@ export const setupCommand = async () => {
   await installOpenCodeSkills(result);
   await installCodexSkills(result);
   await installCodexHooks(result);
+  await installCodexAgentsFile(result);
 
   // Print results
   if (result.configured.length > 0) {

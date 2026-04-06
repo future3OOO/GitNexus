@@ -104,6 +104,10 @@ describe('setupCommand skills integration', () => {
     expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
     expect(hooksJson.hooks.PostToolUse[0].matcher).toBe('Bash');
 
+    const codexAgents = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
+    expect(codexAgents).toContain('<!-- gitnexus:start -->');
+    expect(codexAgents).toContain('~/.agents/skills/gitnexus-cli/SKILL.md');
+
     const codexSkill = await fs.readFile(
       path.join(tempHome, '.agents', 'skills', 'gitnexus-cli', 'SKILL.md'),
       'utf-8',
@@ -122,9 +126,12 @@ describe('setupCommand skills integration', () => {
     const sectionMatches = codexConfig.match(/\[mcp_servers\.gitnexus\]/g) ?? [];
     const hookFeatureMatches = codexConfig.match(/^codex_hooks = true$/gm) ?? [];
     const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    const codexAgents = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
+    const agentsSectionMatches = codexAgents.match(/<!-- gitnexus:start -->/g) ?? [];
 
     expect(sectionMatches).toHaveLength(1);
     expect(hookFeatureMatches).toHaveLength(1);
     expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
+    expect(agentsSectionMatches).toHaveLength(1);
   });
 });
