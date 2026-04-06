@@ -32,13 +32,13 @@ To configure MCP for your editor, run `npx gitnexus setup` once — or set it up
 
 | Editor | MCP | Skills | Hooks (auto-augment) | Support |
 |--------|-----|--------|---------------------|---------|
-| **Claude Code** | Yes | Yes | Yes (PreToolUse) | **Full** |
+| **Claude Code** | Yes | Yes | Yes (PreToolUse + PostToolUse) | **Full** |
 | **Cursor** | Yes | Yes | — | MCP + Skills |
-| **Codex** | Yes | Yes | — | MCP + Skills |
+| **Codex** | Yes | Yes | Yes (PostToolUse on Bash) | MCP + Skills + Hooks |
 | **Windsurf** | Yes | — | — | MCP |
 | **OpenCode** | Yes | Yes | — | MCP + Skills |
 
-> **Claude Code** gets the deepest integration: MCP tools + agent skills + PreToolUse hooks that automatically enrich grep/glob/bash calls with knowledge graph context.
+> **Claude Code** still has the deepest hook surface today because it can enrich native `Grep` / `Glob` / `Bash` searches pre-tool. **Codex** now gets global hooks too, but current Codex runtime only emits `PreToolUse` / `PostToolUse` for `Bash`.
 
 ### Community Integrations
 
@@ -60,11 +60,17 @@ claude mcp add gitnexus -- npx -y gitnexus@latest mcp
 claude mcp add gitnexus -- cmd /c npx -y gitnexus@latest mcp
 ```
 
-### Codex (full support — MCP + skills)
+### Codex (MCP + skills + global Bash hooks)
 
 ```bash
 codex mcp add gitnexus -- npx -y gitnexus@latest mcp
 ```
+
+`gitnexus setup` also enables `features.codex_hooks = true`, installs a global
+`~/.codex/hooks.json`, and copies the GitNexus hook script into
+`~/.codex/hooks/gitnexus/`. Current Codex hooks can enrich Bash-based search
+commands (for example `rg` / `grep`) and warn when git mutations make the index
+stale.
 
 ### Cursor / Windsurf
 

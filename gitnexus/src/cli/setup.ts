@@ -25,6 +25,10 @@ interface SetupResult {
   errors: string[];
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /**
  * Resolve the absolute path to the `gitnexus` binary if it's installed
  * globally (or via npm -g / yarn global). Returns null when not found.
@@ -111,6 +115,62 @@ async function writeJsonFile(filePath: string, data: any): Promise<void> {
 }
 
 /**
+ * Copy the bundled GitNexus hook script into a per-agent hooks directory.
+ * Returns the absolute destination path.
+ */
+async function installBundledHookScript(destHooksDir: string): Promise<string> {
+  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', 'claude');
+  const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
+  const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
+
+  await fs.mkdir(destHooksDir, { recursive: true });
+
+  let content = await fs.readFile(src, 'utf-8');
+  // Inject resolved CLI path so the copied hook can find the CLI
+  // even when it's no longer inside the npm package tree.
+  const resolvedCli = path.join(__dirname, '..', 'cli', 'index.js');
+  const normalizedCli = path.resolve(resolvedCli).replace(/\\/g, '/');
+  const jsonCli = JSON.stringify(normalizedCli);
+  content = content.replace(
+    "let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');",
+    `let cliPath = ${jsonCli};`,
+  );
+
+  await fs.writeFile(dest, content, 'utf-8');
+  return dest;
+}
+
+interface HookEntry {
+  matcher?: string;
+  hooks?: Array<{ command?: string }>;
+}
+
+function ensureCommandHookEntry(
+  existing: any,
+  eventName: string,
+  matcher: string | undefined,
+  hookCmd: string,
+  timeout: number,
+  statusMessage: string,
+) {
+  if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
+  if (!existing.hooks[eventName]) existing.hooks[eventName] = [];
+
+  const hasHook = existing.hooks[eventName].some((entry: HookEntry) => {
+    const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
+    return matcherMatches && entry.hooks?.some((hook) => hook.command === hookCmd);
+  });
+
+  if (hasHook) return;
+
+  const nextEntry: { matcher?: string; hooks: Array<Record<string, any>> } = {
+    hooks: [{ type: 'command', command: hookCmd, timeout, statusMessage }],
+  };
+  if (matcher) nextEntry.matcher = matcher;
+  existing.hooks[eventName].push(nextEntry);
+}
+
+/**
  * Check if a directory exists
  */
 async function dirExists(dirPath: string): Promise<boolean> {
@@ -189,67 +249,34 @@ async function installClaudeCodeHooks(result: SetupResult): Promise<void> {
 
   const settingsPath = path.join(claudeDir, 'settings.json');
 
-  // Source hooks bundled within the gitnexus package (hooks/claude/)
-  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', 'claude');
-
   // Copy unified hook script to ~/.claude/hooks/gitnexus/
   const destHooksDir = path.join(claudeDir, 'hooks', 'gitnexus');
 
   try {
-    await fs.mkdir(destHooksDir, { recursive: true });
-
-    const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
-    const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
-    try {
-      let content = await fs.readFile(src, 'utf-8');
-      // Inject resolved CLI path so the copied hook can find the CLI
-      // even when it's no longer inside the npm package tree
-      const resolvedCli = path.join(__dirname, '..', 'cli', 'index.js');
-      const normalizedCli = path.resolve(resolvedCli).replace(/\\/g, '/');
-      const jsonCli = JSON.stringify(normalizedCli);
-      content = content.replace(
-        "let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');",
-        `let cliPath = ${jsonCli};`,
-      );
-      await fs.writeFile(dest, content, 'utf-8');
-    } catch {
-      // Script not found in source — skip
-    }
-
-    const hookPath = path.join(destHooksDir, 'gitnexus-hook.cjs').replace(/\\/g, '/');
+    const hookPath = (await installBundledHookScript(destHooksDir)).replace(/\\/g, '/');
     const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
 
     // Merge hook config into ~/.claude/settings.json
     const existing = (await readJsonFile(settingsPath)) || {};
-    if (!existing.hooks) existing.hooks = {};
-
     // NOTE: SessionStart hooks are broken on Windows (Claude Code bug #23576).
     // Session context is delivered via CLAUDE.md / skills instead.
 
-    // Helper: add a hook entry if one with 'gitnexus-hook' isn't already registered
-    interface HookEntry {
-      hooks?: Array<{ command?: string }>;
-    }
-    function ensureHookEntry(
-      eventName: string,
-      matcher: string,
-      timeout: number,
-      statusMessage: string,
-    ) {
-      if (!existing.hooks[eventName]) existing.hooks[eventName] = [];
-      const hasHook = existing.hooks[eventName].some((h: HookEntry) =>
-        h.hooks?.some((hh) => hh.command?.includes('gitnexus-hook')),
-      );
-      if (!hasHook) {
-        existing.hooks[eventName].push({
-          matcher,
-          hooks: [{ type: 'command', command: hookCmd, timeout, statusMessage }],
-        });
-      }
-    }
-
-    ensureHookEntry('PreToolUse', 'Grep|Glob|Bash', 10, 'Enriching with GitNexus graph context...');
-    ensureHookEntry('PostToolUse', 'Bash', 10, 'Checking GitNexus index freshness...');
+    ensureCommandHookEntry(
+      existing,
+      'PreToolUse',
+      'Grep|Glob|Bash',
+      hookCmd,
+      10,
+      'Enriching with GitNexus graph context...',
+    );
+    ensureCommandHookEntry(
+      existing,
+      'PostToolUse',
+      'Bash',
+      hookCmd,
+      10,
+      'Checking GitNexus index freshness...',
+    );
 
     await writeJsonFile(settingsPath, existing);
     result.configured.push('Claude Code hooks (PreToolUse, PostToolUse)');
@@ -288,6 +315,28 @@ function getCodexMcpTomlSection(): string {
   return `[mcp_servers.gitnexus]\ncommand = ${command}\nargs = ${args}\n`;
 }
 
+function upsertTomlKey(content: string, sectionName: string, key: string, value: string): string {
+  const sectionRegex = new RegExp(
+    `(^|\\n)\\[${escapeRegExp(sectionName)}\\]\\n([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`,
+  );
+  const keyRegex = new RegExp(`^${escapeRegExp(key)}\\s*=`, 'm');
+  const line = `${key} = ${value}`;
+
+  if (!content.trim()) {
+    return `[${sectionName}]\n${line}\n`;
+  }
+
+  if (!sectionRegex.test(content)) {
+    return `${content.trimEnd()}\n\n[${sectionName}]\n${line}\n`;
+  }
+
+  return content.replace(sectionRegex, (fullMatch, prefix, body) => {
+    if (keyRegex.test(body)) return fullMatch;
+    const normalizedBody = body.endsWith('\n') || body.length === 0 ? body : `${body}\n`;
+    return `${prefix}[${sectionName}]\n${normalizedBody}${line}\n`;
+  });
+}
+
 /**
  * Append GitNexus MCP server config to Codex's config.toml if missing.
  */
@@ -299,12 +348,13 @@ async function upsertCodexConfigToml(configPath: string): Promise<void> {
     existing = '';
   }
 
-  if (existing.includes('[mcp_servers.gitnexus]')) {
-    return;
+  let nextContent = existing;
+  if (!nextContent.includes('[mcp_servers.gitnexus]')) {
+    const section = getCodexMcpTomlSection();
+    nextContent =
+      nextContent.trim().length > 0 ? `${nextContent.trimEnd()}\n\n${section}` : section;
   }
-
-  const section = getCodexMcpTomlSection();
-  const nextContent = existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${section}` : section;
+  nextContent = upsertTomlKey(nextContent, 'features', 'codex_hooks', 'true');
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, `${nextContent.trimEnd()}\n`, 'utf-8');
@@ -317,23 +367,54 @@ async function setupCodex(result: SetupResult): Promise<void> {
     return;
   }
 
+  const configPath = path.join(codexDir, 'config.toml');
+  let usedCli = false;
+
   try {
     const entry = getMcpEntry();
     await execFileAsync('codex', ['mcp', 'add', 'gitnexus', '--', entry.command, ...entry.args], {
       shell: process.platform === 'win32',
     });
-    result.configured.push('Codex');
-    return;
+    usedCli = true;
   } catch {
     // Fallback for environments where `codex` binary isn't on PATH.
   }
 
   try {
-    const configPath = path.join(codexDir, 'config.toml');
     await upsertCodexConfigToml(configPath);
-    result.configured.push('Codex (MCP added to ~/.codex/config.toml)');
+    result.configured.push(
+      usedCli ? 'Codex' : 'Codex (MCP added to ~/.codex/config.toml)',
+    );
   } catch (err: any) {
     result.errors.push(`Codex: ${err.message}`);
+  }
+}
+
+async function installCodexHooks(result: SetupResult): Promise<void> {
+  const codexDir = path.join(os.homedir(), '.codex');
+  if (!(await dirExists(codexDir))) return;
+
+  const hooksPath = path.join(codexDir, 'hooks.json');
+  const destHooksDir = path.join(codexDir, 'hooks', 'gitnexus');
+
+  try {
+    const hookPath = (await installBundledHookScript(destHooksDir)).replace(/\\/g, '/');
+    const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
+    const existing = (await readJsonFile(hooksPath)) || {};
+
+    ensureCommandHookEntry(
+      existing,
+      'PostToolUse',
+      'Bash',
+      hookCmd,
+      10,
+      'Reviewing Bash output with GitNexus...',
+    );
+
+    await writeJsonFile(hooksPath, existing);
+    result.configured.push('Codex hooks (PostToolUse Bash)');
+  } catch (err: any) {
+    result.errors.push(`Codex hooks: ${err.message}`);
   }
 }
 
@@ -501,6 +582,7 @@ export const setupCommand = async () => {
   await installCursorSkills(result);
   await installOpenCodeSkills(result);
   await installCodexSkills(result);
+  await installCodexHooks(result);
 
   // Print results
   if (result.configured.length > 0) {

@@ -439,6 +439,40 @@ describe('PostToolUse staleness detection (integration)', () => {
   }
 });
 
+describe('PostToolUse Codex payload support (integration)', () => {
+  it('CJS hook parses Codex tool_response JSON strings', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CJS_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: JSON.stringify({ exit_code: 0 }),
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.hookEventName).toBe('PostToolUse');
+    expect(output!.additionalContext).toContain('stale');
+  });
+
+  it('CJS hook ignores failed Codex tool_response payloads', () => {
+    const result = runHook(CJS_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "fail"' },
+      tool_response: JSON.stringify({ exit_code: 1 }),
+      cwd: tmpDir,
+    });
+
+    expect(result.stdout.trim()).toBe('');
+  });
+});
+
 // ─── Integration: cwd validation rejects relative paths ─────────────
 
 describe('cwd validation (integration)', () => {

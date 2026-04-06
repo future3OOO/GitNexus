@@ -67,9 +67,23 @@ describe('setupCommand codex execution', () => {
       { shell: true },
       expect.any(Function),
     );
+
+    const codexConfig = await fs.readFile(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(codexConfig).toContain('[mcp_servers.gitnexus]');
+    expect(codexConfig).toContain('[features]');
+    expect(codexConfig).toContain('codex_hooks = true');
+
+    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
+    expect(hooksJson.hooks.PostToolUse[0].matcher).toBe('Bash');
+    expect(hooksJson.hooks.PostToolUse[0].hooks[0].command).toContain('gitnexus-hook.cjs');
+
+    await expect(
+      fs.access(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs')),
+    ).resolves.toBeUndefined();
   });
 
-  it('invokes codex mcp add without shell on non-Windows and does not write fallback config', async () => {
+  it('invokes codex mcp add without shell on non-Windows and still enables global Codex hooks', async () => {
     setPlatform('darwin');
 
     const { setupCommand } = await import('../../src/cli/setup.js');
@@ -83,7 +97,12 @@ describe('setupCommand codex execution', () => {
       expect.any(Function),
     );
 
-    await expect(fs.access(path.join(tempHome, '.codex', 'config.toml'))).rejects.toThrow();
+    const codexConfig = await fs.readFile(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(codexConfig).toContain('[mcp_servers.gitnexus]');
+    expect(codexConfig).toContain('codex_hooks = true');
+
+    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    expect(hooksJson.hooks.PostToolUse[0].matcher).toBe('Bash');
   });
 
   it('skips Codex setup entirely when ~/.codex is missing', async () => {
