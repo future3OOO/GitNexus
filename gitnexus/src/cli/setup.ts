@@ -14,7 +14,6 @@ import { promisify } from 'util';
 import { fileURLToPath } from 'url';
 import { glob } from 'glob';
 import { getGlobalDir } from '../storage/repo-manager.js';
-import { codexHookContractLine } from './integration-contract.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -175,7 +174,6 @@ When you are inside an indexed repository, use GitNexus to understand structure,
 - A global Codex Bash hook is installed in \`~/.codex/hooks.json\`
 - Bash search commands can be enriched with GitNexus context automatically
 - Bash git mutations can warn when the GitNexus index is stale
-- ${codexHookContractLine}
 - Native MCP tools like \`fff\` are not hooked directly, so use the search flow above
 
 ## Skills
@@ -207,16 +205,11 @@ async function installBundledHookScript(
   destHooksDir: string,
   hookVariant: 'claude' | 'codex',
 ): Promise<string> {
-  const hooksRoot = path.join(__dirname, '..', '..', 'hooks');
-  const variantSrcDir = path.join(hooksRoot, hookVariant);
-  const sharedSrcDir = path.join(hooksRoot, 'shared');
-  const src = path.join(variantSrcDir, 'gitnexus-hook.cjs');
-  const destVariantDir = path.join(destHooksDir, hookVariant);
-  const destSharedDir = path.join(destHooksDir, 'shared');
-  const dest = path.join(destVariantDir, 'gitnexus-hook.cjs');
+  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', hookVariant);
+  const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
+  const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
 
-  await fs.mkdir(destVariantDir, { recursive: true });
-  await fs.mkdir(destSharedDir, { recursive: true });
+  await fs.mkdir(destHooksDir, { recursive: true });
 
   let content = await fs.readFile(src, 'utf-8');
   // Inject resolved CLI path so the copied hook can find the CLI
@@ -225,15 +218,11 @@ async function installBundledHookScript(
   const normalizedCli = path.resolve(resolvedCli).replace(/\\/g, '/');
   const jsonCli = JSON.stringify(normalizedCli);
   content = content.replace(
-    "'__GITNEXUS_CLI_PATH__'",
-    jsonCli,
+    "let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');",
+    `let cliPath = ${jsonCli};`,
   );
 
   await fs.writeFile(dest, content, 'utf-8');
-  await fs.copyFile(
-    path.join(sharedSrcDir, 'gitnexus-hook-core.cjs'),
-    path.join(destSharedDir, 'gitnexus-hook-core.cjs'),
-  );
   return dest;
 }
 
@@ -249,22 +238,18 @@ function ensureCommandHookEntry(
   hookCmd: string,
   timeout: number,
   statusMessage: string,
-  legacyHookCmds: string[] = [],
 ) {
   if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
   if (!Array.isArray(existing.hooks[eventName])) existing.hooks[eventName] = [];
 
   const existingEntry = existing.hooks[eventName].find((entry: HookEntry) => {
     const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
-    return (
-      matcherMatches &&
-      entry.hooks?.some((hook) => hook.command === hookCmd || legacyHookCmds.includes(hook.command || ''))
-    );
+    return matcherMatches && entry.hooks?.some((hook) => hook.command === hookCmd);
   });
 
   if (existingEntry) {
     existingEntry.hooks = (existingEntry.hooks ?? []).map((hook) =>
-      hook.command === hookCmd || legacyHookCmds.includes(hook.command || '')
+      hook.command === hookCmd
         ? { ...hook, type: 'command', command: hookCmd, timeout, statusMessage }
         : hook,
     );
@@ -376,7 +361,6 @@ async function installClaudeCodeHooks(result: SetupResult): Promise<void> {
       hookCmd,
       10,
       'Enriching with GitNexus graph context...',
-      [`node "${path.join(destHooksDir, 'gitnexus-hook.cjs').replace(/\\/g, '/').replace(/"/g, '\\"')}"`],
     );
     ensureCommandHookEntry(
       existing,
@@ -385,7 +369,6 @@ async function installClaudeCodeHooks(result: SetupResult): Promise<void> {
       hookCmd,
       10,
       'Checking GitNexus index freshness...',
-      [`node "${path.join(destHooksDir, 'gitnexus-hook.cjs').replace(/\\/g, '/').replace(/"/g, '\\"')}"`],
     );
 
     await writeJsonFile(settingsPath, existing);
@@ -534,7 +517,6 @@ async function installCodexHooks(result: SetupResult): Promise<void> {
       hookCmd,
       20,
       'Reviewing Bash output with GitNexus...',
-      [`node "${path.join(destHooksDir, 'gitnexus-hook.cjs').replace(/\\/g, '/').replace(/"/g, '\\"')}"`],
     );
 
     await writeJsonFile(hooksPath, existing);

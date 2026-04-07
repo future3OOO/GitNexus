@@ -164,12 +164,12 @@ Stay on the current PR branch unless implementation complexity forces a regroup.
 - [x] P1 preflight against the live branch + this artifact.
 - [x] Implement P1.
 - [x] Run P1 verification and update this checklist.
-- [x] P2 preflight against the updated branch + this artifact.
-- [x] Implement P2.
-- [x] Run P2 verification and update this checklist.
-- [x] P3 preflight against the updated branch + this artifact.
-- [x] Implement P3.
-- [x] Run P3 verification and update this checklist.
+- [ ] P2 preflight against the updated branch + this artifact.
+- [ ] Implement P2.
+- [ ] Run P2 verification and update this checklist.
+- [ ] P3 preflight against the updated branch + this artifact.
+- [ ] Implement P3.
+- [ ] Run P3 verification and update this checklist.
 - [ ] Run final repo gates.
 - [ ] Run `gitnexus_detect_changes({repo:"GitNexus",scope:"all"})`.
 - [ ] Commit and push the implementation.

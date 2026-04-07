@@ -3,22 +3,16 @@
  */
 import { spawnSync } from 'child_process';
 
-interface RunHookOptions {
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-}
-
 export function runHook(
   hookPath: string,
   input: Record<string, any>,
-  options: RunHookOptions = {},
+  cwd?: string,
 ): { stdout: string; stderr: string; status: number | null } {
   const result = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf-8',
     timeout: 10000,
-    cwd: options.cwd,
-    env: options.env ? { ...process.env, ...options.env } : process.env,
+    cwd,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   return {

@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
-import { codexHookContractLine } from '../../src/cli/integration-contract.js';
 
 const execFileMock = vi.fn((...args: any[]) => {
   const callback = args.at(-1);
@@ -80,24 +79,18 @@ describe('setupCommand codex execution', () => {
     expect(hooksJson.hooks.PostToolUse[0].hooks[0].command).toContain('gitnexus-hook.cjs');
 
     await expect(
-      fs.access(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'codex', 'gitnexus-hook.cjs')),
+      fs.access(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs')),
     ).resolves.toBeUndefined();
     const installedHook = await fs.readFile(
-      path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'codex', 'gitnexus-hook.cjs'),
+      path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs'),
       'utf-8',
     );
     expect(installedHook).toContain('GitNexus Codex Hook');
-    await expect(
-      fs.access(
-        path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'shared', 'gitnexus-hook-core.cjs'),
-      ),
-    ).resolves.toBeUndefined();
 
     const agentsContent = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
     expect(agentsContent).toContain('<!-- gitnexus:start -->');
     expect(agentsContent).toContain('~/.agents/skills/gitnexus-exploring/SKILL.md');
     expect(agentsContent).toContain('~/.codex/hooks.json');
-    expect(agentsContent).toContain(codexHookContractLine);
   });
 
   it('invokes codex mcp add without shell on non-Windows and still enables global Codex hooks', async () => {
@@ -123,7 +116,6 @@ describe('setupCommand codex execution', () => {
 
     const agentsContent = await fs.readFile(path.join(tempHome, '.codex', 'AGENTS.md'), 'utf-8');
     expect(agentsContent).toContain('GitNexus — Global Workflow');
-    expect(agentsContent).toContain(codexHookContractLine);
   });
 
   it('skips Codex setup entirely when ~/.codex is missing', async () => {
@@ -222,52 +214,6 @@ describe('setupCommand codex execution', () => {
   });
 
   it('updates existing Codex hook entries in place when the command already exists', async () => {
-    await fs.mkdir(path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'codex'), { recursive: true });
-    await fs.writeFile(
-      path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'codex', 'gitnexus-hook.cjs'),
-      '#!/usr/bin/env node\n',
-      'utf-8',
-    );
-    await fs.writeFile(
-      path.join(tempHome, '.codex', 'hooks.json'),
-      JSON.stringify(
-        {
-          hooks: {
-            PostToolUse: [
-              {
-                matcher: 'Bash',
-                hooks: [
-                  {
-                    type: 'command',
-                    command: `node "${path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'codex', 'gitnexus-hook.cjs').replace(/\\/g, '/')}"`,
-                    timeout: 10,
-                    statusMessage: 'Old message',
-                  },
-                ],
-              },
-            ],
-          },
-        },
-        null,
-        2,
-      ),
-      'utf-8',
-    );
-
-    const { setupCommand } = await import('../../src/cli/setup.js');
-
-    await setupCommand();
-
-    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
-    expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
-    expect(hooksJson.hooks.PostToolUse[0].hooks).toHaveLength(1);
-    expect(hooksJson.hooks.PostToolUse[0].hooks[0].timeout).toBe(20);
-    expect(hooksJson.hooks.PostToolUse[0].hooks[0].statusMessage).toBe(
-      'Reviewing Bash output with GitNexus...',
-    );
-  });
-
-  it('migrates legacy Codex hook command paths to the shared-runtime layout', async () => {
     await fs.mkdir(path.join(tempHome, '.codex', 'hooks', 'gitnexus'), { recursive: true });
     await fs.writeFile(
       path.join(tempHome, '.codex', 'hooks', 'gitnexus', 'gitnexus-hook.cjs'),
@@ -307,7 +253,9 @@ describe('setupCommand codex execution', () => {
     const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
     expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
     expect(hooksJson.hooks.PostToolUse[0].hooks).toHaveLength(1);
-    expect(hooksJson.hooks.PostToolUse[0].hooks[0].command).toContain('/hooks/gitnexus/codex/gitnexus-hook.cjs');
     expect(hooksJson.hooks.PostToolUse[0].hooks[0].timeout).toBe(20);
+    expect(hooksJson.hooks.PostToolUse[0].hooks[0].statusMessage).toBe(
+      'Reviewing Bash output with GitNexus...',
+    );
   });
 });
