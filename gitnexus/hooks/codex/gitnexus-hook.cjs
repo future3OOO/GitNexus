@@ -74,7 +74,7 @@ function extractPattern(command) {
 }
 
 function extractBashResult(input) {
-  const response = input.tool_response;
+  const response = input.tool_response ?? input.tool_output;
   if (response && typeof response === 'object') return response;
   if (typeof response !== 'string' || !response.trim()) return null;
 
@@ -86,10 +86,10 @@ function extractBashResult(input) {
 }
 
 function isSuccessfulBashResult(result) {
-  if (!result || typeof result !== 'object') return true;
+  if (!result || typeof result !== 'object') return false;
   if (typeof result.exit_code === 'number') return result.exit_code === 0;
   if (typeof result.exitCode === 'number') return result.exitCode === 0;
-  return true;
+  return false;
 }
 
 function resolveCliPath() {

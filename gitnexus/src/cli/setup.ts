@@ -242,12 +242,19 @@ function ensureCommandHookEntry(
   if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
   if (!Array.isArray(existing.hooks[eventName])) existing.hooks[eventName] = [];
 
-  const hasHook = existing.hooks[eventName].some((entry: HookEntry) => {
+  const existingEntry = existing.hooks[eventName].find((entry: HookEntry) => {
     const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
     return matcherMatches && entry.hooks?.some((hook) => hook.command === hookCmd);
   });
 
-  if (hasHook) return;
+  if (existingEntry) {
+    existingEntry.hooks = (existingEntry.hooks ?? []).map((hook) =>
+      hook.command === hookCmd
+        ? { ...hook, type: 'command', command: hookCmd, timeout, statusMessage }
+        : hook,
+    );
+    return;
+  }
 
   const nextEntry: { matcher?: string; hooks: Array<Record<string, any>> } = {
     hooks: [{ type: 'command', command: hookCmd, timeout, statusMessage }],
@@ -402,31 +409,40 @@ function getCodexMcpTomlSection(): string {
 }
 
 function upsertTomlKey(content: string, sectionName: string, key: string, value: string): string {
-  const sectionRegex = new RegExp(
-    `(^|\\n)\\[${escapeRegExp(sectionName)}\\]\\n([\\s\\S]*?)(?=\\n\\[[^\\]]+\\]|$)`,
-  );
-  const keyRegex = new RegExp(`^${escapeRegExp(key)}\\s*=`, 'm');
-  const keyLineRegex = new RegExp(`^\\s*${escapeRegExp(key)}\\s*=.*$`, 'm');
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const line = `${key} = ${value}`;
+  const sectionHeaderRegex = new RegExp(
+    `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*[#;].*)?$`,
+  );
+  const anySectionRegex = /^\s*\[[^\]]+\]/;
+  const keyLineRegex = new RegExp(`^(\\s*)${escapeRegExp(key)}\\s*=.*$`);
 
   if (!content.trim()) {
-    return `[${sectionName}]\n${line}\n`;
+    return `[${sectionName}]${eol}${line}${eol}`;
   }
 
-  if (!sectionRegex.test(content)) {
-    return `${content.trimEnd()}\n\n[${sectionName}]\n${line}\n`;
+  const lines = content.trimEnd().split(/\r?\n/);
+  const sectionStart = lines.findIndex((entry) => sectionHeaderRegex.test(entry));
+  if (sectionStart === -1) {
+    return `${content.trimEnd()}${eol}${eol}[${sectionName}]${eol}${line}${eol}`;
   }
 
-  return content.replace(sectionRegex, (fullMatch, prefix, body) => {
-    if (keyRegex.test(body)) {
-      const replacedBody = body.replace(keyLineRegex, line);
-      const normalizedBody =
-        replacedBody.endsWith('\n') || replacedBody.length === 0 ? replacedBody : `${replacedBody}\n`;
-      return `${prefix}[${sectionName}]\n${normalizedBody}`;
+  let insertAt = lines.length;
+  for (let idx = sectionStart + 1; idx < lines.length; idx += 1) {
+    if (anySectionRegex.test(lines[idx])) {
+      insertAt = idx;
+      break;
     }
-    const normalizedBody = body.endsWith('\n') || body.length === 0 ? body : `${body}\n`;
-    return `${prefix}[${sectionName}]\n${normalizedBody}${line}\n`;
-  });
+    const keyMatch = lines[idx].match(keyLineRegex);
+    if (keyMatch) {
+      const indent = keyMatch[1] ?? '';
+      lines[idx] = `${indent}${line}`;
+      return `${lines.join(eol)}${eol}`;
+    }
+  }
+
+  lines.splice(insertAt, 0, line);
+  return `${lines.join(eol)}${eol}`;
 }
 
 /**
@@ -499,7 +515,7 @@ async function installCodexHooks(result: SetupResult): Promise<void> {
       'PostToolUse',
       'Bash',
       hookCmd,
-      10,
+      20,
       'Reviewing Bash output with GitNexus...',
     );
 

@@ -511,6 +511,37 @@ describe('PostToolUse Codex payload support (integration)', () => {
     expect(result.stdout.trim()).toBe('');
   });
 
+  it('Codex hook ignores unrecognised Codex tool_response objects', () => {
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "fail"' },
+      tool_response: JSON.stringify({ status: 'failed' }),
+      cwd: tmpDir,
+    });
+
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook accepts object-shaped tool responses with exit_code', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: { exit_code: 0 },
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.additionalContext).toContain('stale');
+  });
+
   it('Codex hook still emits stale warnings for mixed search + git commands', () => {
     fs.writeFileSync(
       path.join(gitNexusDir, 'meta.json'),
