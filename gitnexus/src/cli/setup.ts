@@ -228,7 +228,7 @@ async function installBundledHookScript(
 
 interface HookEntry {
   matcher?: string;
-  hooks?: Array<{ command?: string }>;
+  hooks?: Array<{ command?: string }> | unknown;
 }
 
 function ensureCommandHookEntry(
@@ -242,13 +242,16 @@ function ensureCommandHookEntry(
   if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
   if (!Array.isArray(existing.hooks[eventName])) existing.hooks[eventName] = [];
 
-  const existingEntry = existing.hooks[eventName].find((entry: HookEntry) => {
+  const existingEntry = existing.hooks[eventName].find((entry: HookEntry | null) => {
+    if (!entry || typeof entry !== 'object') return false;
     const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
-    return matcherMatches && entry.hooks?.some((hook) => hook.command === hookCmd);
+    const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+    return matcherMatches && hooks.some((hook) => hook?.command === hookCmd);
   });
 
   if (existingEntry) {
-    existingEntry.hooks = (existingEntry.hooks ?? []).map((hook) =>
+    const hooks = Array.isArray(existingEntry.hooks) ? existingEntry.hooks : [];
+    existingEntry.hooks = hooks.map((hook) =>
       hook.command === hookCmd
         ? { ...hook, type: 'command', command: hookCmd, timeout, statusMessage }
         : hook,

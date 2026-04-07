@@ -258,4 +258,38 @@ describe('setupCommand codex execution', () => {
       'Reviewing Bash output with GitNexus...',
     );
   });
+
+  it('repairs malformed existing Codex hook entries without throwing', async () => {
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'hooks.json'),
+      JSON.stringify(
+        {
+          hooks: {
+            PostToolUse: [
+              null,
+              {
+                matcher: 'Bash',
+                hooks: {},
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await expect(setupCommand()).resolves.toBeUndefined();
+
+    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    expect(hooksJson.hooks.PostToolUse).toHaveLength(3);
+    const repairedEntry = hooksJson.hooks.PostToolUse.at(-1);
+    expect(repairedEntry.matcher).toBe('Bash');
+    expect(repairedEntry.hooks).toHaveLength(1);
+    expect(repairedEntry.hooks[0].timeout).toBe(20);
+    expect(repairedEntry.hooks[0].statusMessage).toBe('Reviewing Bash output with GitNexus...');
+  });
 });
