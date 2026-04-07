@@ -102,7 +102,12 @@ The CLI indexes your repository and runs an MCP server that gives AI agents deep
 npx gitnexus analyze
 ```
 
-That's it. This indexes the codebase, installs agent skills, registers Claude Code hooks, and creates `AGENTS.md` / `CLAUDE.md` context files — all in one command.
+<!-- gitnexus:analyze-behavior:start -->
+- Plain `npx gitnexus analyze` indexes or refreshes the graph in `.gitnexus/` only.
+- Use `npx gitnexus analyze --ai-context` to generate repo-local `AGENTS.md` / `CLAUDE.md` context and bundled `.claude/skills`.
+- Use `npx gitnexus analyze --skills` to generate repo-specific skills; this also materializes the repo-local AI context.
+- Use `npx gitnexus setup` once for global MCP wiring, global skills, and editor hook installation.
+<!-- gitnexus:analyze-behavior:end -->
 
 To configure MCP for your editor, run `npx gitnexus setup` once — or set it up manually below.
 
@@ -112,16 +117,17 @@ To configure MCP for your editor, run `npx gitnexus setup` once — or set it up
 
 ### Editor Support
 
-| Editor                | MCP | Skills | Hooks (auto-augment) | Support        |
-| --------------------- | --- | ------ | -------------------- | -------------- |
-| **Claude Code** | Yes | Yes    | Yes (PreToolUse + PostToolUse) | **Full** |
-| **Cursor**      | Yes | Yes    | —                   | MCP + Skills   |
-| **Codex**       | Yes | Yes    | —                   | MCP + Skills   |
-| **Windsurf**    | Yes | —     | —                   | MCP            |
-| **OpenCode**    | Yes | Yes    | —                   | MCP + Skills   |
-| **Codex**       | Yes | —     | —                   | MCP            |
+<!-- gitnexus:editor-support:start -->
+| Editor | MCP | Skills | Hooks (auto-augment) | Support |
+|--------|-----|--------|---------------------|---------|
+| **Claude Code** | Yes | Yes | Yes (PreToolUse + PostToolUse) | **Full** |
+| **Cursor** | Yes | Yes | — | MCP + Skills |
+| **Codex** | Yes | Yes | Yes (PostToolUse on Bash) | MCP + Skills + Hooks |
+| **Windsurf** | Yes | — | — | MCP |
+| **OpenCode** | Yes | Yes | — | MCP + Skills |
+<!-- gitnexus:editor-support:end -->
 
-> **Claude Code** gets the deepest integration: MCP tools + agent skills + PreToolUse hooks that enrich searches with graph context + PostToolUse hooks that auto-reindex after commits.
+> **Claude Code** still has the deepest hook surface today because it can enrich native `Grep` / `Glob` / `Bash` searches pre-tool. **Codex** now gets global hooks too, but current Codex runtime only emits `PreToolUse` / `PostToolUse` for `Bash`.
 
 ## Community Integrations
 
@@ -146,11 +152,19 @@ claude mcp add gitnexus -- npx -y gitnexus@latest mcp
 claude mcp add gitnexus -- cmd /c npx -y gitnexus@latest mcp
 ```
 
-**Codex** (full support — MCP + skills):
+**Codex** (MCP + skills + global Bash hooks):
 
 ```bash
 codex mcp add gitnexus -- npx -y gitnexus@latest mcp
 ```
+
+`gitnexus setup` also enables `features.codex_hooks = true`, installs a global
+`~/.codex/hooks.json`, and copies a dedicated Codex GitNexus hook into
+`~/.codex/hooks/gitnexus/codex/` plus the shared runtime at
+`~/.codex/hooks/gitnexus/shared/`. It also installs a GitNexus section into the global
+`~/.codex/AGENTS.md` so Codex has persistent workflow guidance and skill
+references. Current Codex hooks can enrich Bash-based search commands (for
+example `rg` / `grep`) and warn when git mutations make the index stale.
 
 **Cursor** (`~/.cursor/mcp.json` — global, works for all projects):
 
@@ -190,12 +204,12 @@ args = ["-y", "gitnexus@latest", "mcp"]
 
 ```bash
 gitnexus setup                   # Configure MCP for your editors (one-time)
-gitnexus analyze [path]          # Index a repository (or update stale index)
+gitnexus analyze [path]          # Index or refresh the graph only
 gitnexus analyze --force         # Force full re-index
-gitnexus analyze --skills        # Generate repo-specific skill files from detected communities
-gitnexus analyze --skip-embeddings  # Skip embedding generation (faster)
-gitnexus analyze --skip-agents-md  # Preserve custom AGENTS.md/CLAUDE.md gitnexus section edits
 gitnexus analyze --embeddings    # Enable embedding generation (slower, better search)
+gitnexus analyze --ai-context    # Generate repo-local AGENTS.md / CLAUDE.md and bundled .claude skills
+gitnexus analyze --skills        # Generate repo-specific skills (+ repo-local AI context)
+gitnexus analyze --skip-agents-md  # Preserve custom AGENTS.md / CLAUDE.md gitnexus block edits during AI-context generation
 gitnexus analyze --verbose       # Log skipped files when parsers are unavailable
 gitnexus mcp                     # Start MCP server (stdio) — serves all indexed repos
 gitnexus serve                   # Start local HTTP server (multi-repo) for web UI connection
