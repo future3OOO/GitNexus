@@ -6,7 +6,7 @@ import fs from 'fs';
 
 describe('--skip-git CLI flag', () => {
   it('Commander maps --skip-git to options.skipGit (not --no-git inversion)', () => {
-    // Verify the CLI defines the explicit analyze safety/materialization flags.
+    // Verify the CLI defines --skip-git and --skip-agents-md in analyze help.
     const helpOutput = execSync('node dist/cli/index.js analyze --help', {
       cwd: path.resolve(__dirname, '../..'),
       encoding: 'utf8',
@@ -14,7 +14,6 @@ describe('--skip-git CLI flag', () => {
     });
 
     expect(helpOutput).toContain('--skip-git');
-    expect(helpOutput).toContain('--ai-context');
     expect(helpOutput).toContain('--skip-agents-md');
     expect(helpOutput).not.toContain('--no-git');
   });

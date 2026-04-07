@@ -8,7 +8,7 @@
  * Uses process.execPath (never 'node' string), no shell: true.
  * Accepts status === null (timeout) as valid on slow CI runners.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawnSync, spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
@@ -53,37 +53,12 @@ beforeAll(() => {
 
 afterAll(() => {
   // Clean up .git/ and .gitnexus/ directories created during the test
-  for (const dir of ['.git', '.gitnexus', '.claude']) {
+  for (const dir of ['.git', '.gitnexus']) {
     const fullPath = path.join(MINI_REPO, dir);
     if (fs.existsSync(fullPath)) {
       fs.rmSync(fullPath, { recursive: true, force: true });
     }
   }
-  for (const file of ['AGENTS.md', 'CLAUDE.md']) {
-    const fullPath = path.join(MINI_REPO, file);
-    if (fs.existsSync(fullPath)) {
-      fs.rmSync(fullPath, { force: true });
-    }
-  }
-});
-
-function cleanupGeneratedRepoArtifacts() {
-  for (const dir of ['.gitnexus', '.claude']) {
-    const fullPath = path.join(MINI_REPO, dir);
-    if (fs.existsSync(fullPath)) {
-      fs.rmSync(fullPath, { recursive: true, force: true });
-    }
-  }
-  for (const file of ['AGENTS.md', 'CLAUDE.md']) {
-    const fullPath = path.join(MINI_REPO, file);
-    if (fs.existsSync(fullPath)) {
-      fs.rmSync(fullPath, { force: true });
-    }
-  }
-}
-
-beforeEach(() => {
-  cleanupGeneratedRepoArtifacts();
 });
 
 function runCli(command: string, cwd: string, timeoutMs = 15000) {
@@ -151,33 +126,6 @@ describe('CLI end-to-end', () => {
     const gitnexusDir = path.join(MINI_REPO, '.gitnexus');
     expect(fs.existsSync(gitnexusDir)).toBe(true);
     expect(fs.statSync(gitnexusDir).isDirectory()).toBe(true);
-    expect(fs.existsSync(path.join(MINI_REPO, 'AGENTS.md'))).toBe(false);
-    expect(fs.existsSync(path.join(MINI_REPO, 'CLAUDE.md'))).toBe(false);
-    expect(fs.existsSync(path.join(MINI_REPO, '.claude'))).toBe(false);
-  });
-
-  it('analyze --ai-context materializes repo-local context without requiring a fresh reindex', () => {
-    const firstResult = runCli('analyze', MINI_REPO, 30000);
-
-    if (firstResult.status === null) return;
-    expect(firstResult.status).toBe(0);
-
-    const secondResult = runCliRaw(['analyze', '--ai-context'], MINI_REPO, 30000);
-
-    if (secondResult.status === null) return;
-
-    expect(
-      secondResult.status,
-      [
-        `analyze --ai-context exited with code ${secondResult.status}`,
-        `stdout: ${secondResult.stdout}`,
-        `stderr: ${secondResult.stderr}`,
-      ].join('\n'),
-    ).toBe(0);
-
-    expect(fs.existsSync(path.join(MINI_REPO, 'AGENTS.md'))).toBe(true);
-    expect(fs.existsSync(path.join(MINI_REPO, 'CLAUDE.md'))).toBe(true);
-    expect(fs.existsSync(path.join(MINI_REPO, '.claude', 'skills', 'gitnexus'))).toBe(true);
   });
 
   describe('unhappy path', () => {

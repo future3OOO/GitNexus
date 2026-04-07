@@ -5,8 +5,7 @@
  *
  * Delegates core analysis to the shared runFullAnalysis orchestrator.
  * This CLI wrapper handles: heap management, progress bar, SIGINT,
- * optional repo-local AI context generation (--ai-context / --skills),
- * summary output, and process.exit().
+ * skill generation (--skills), summary output, and process.exit().
  */
 
 import path from 'path';
@@ -16,8 +15,7 @@ import cliProgress from 'cli-progress';
 import { closeLbug } from '../core/lbug/lbug-adapter.js';
 import { getStoragePaths, getGlobalRegistryPath } from '../storage/repo-manager.js';
 import { getGitRoot, hasGitDir } from '../storage/git.js';
-import { runFullAnalysis, type AnalyzeResult as CoreAnalyzeResult } from '../core/run-analyze.js';
-import type { GeneratedSkillInfo } from './skill-gen.js';
+import { runFullAnalysis } from '../core/run-analyze.js';
 import fs from 'fs/promises';
 
 const HEAP_MB = 8192;
@@ -45,58 +43,12 @@ function ensureHeap(): boolean {
 export interface AnalyzeOptions {
   force?: boolean;
   embeddings?: boolean;
-  /** Generate repo-local AGENTS.md / CLAUDE.md context and bundled .claude skills. */
-  aiContext?: boolean;
   skills?: boolean;
   verbose?: boolean;
   /** Skip AGENTS.md and CLAUDE.md gitnexus block updates. */
   skipAgentsMd?: boolean;
   /** Index the folder even when no .git directory is present. */
   skipGit?: boolean;
-}
-
-function buildAIContextStats(result: {
-  stats: CoreAnalyzeResult['stats'];
-  pipelineResult?: CoreAnalyzeResult['pipelineResult'];
-}) {
-  let aggregatedClusterCount: number | undefined;
-  const communityResult = result.pipelineResult?.communityResult;
-  if (communityResult?.communities) {
-    const groups = new Map<string, number>();
-    for (const community of communityResult.communities) {
-      const label = community.heuristicLabel || community.label || 'Unknown';
-      groups.set(label, (groups.get(label) || 0) + community.symbolCount);
-    }
-    aggregatedClusterCount = Array.from(groups.values()).filter((count) => count >= 5).length;
-  }
-
-  const stats = result.stats;
-  return {
-    files: stats.files ?? 0,
-    nodes: stats.nodes ?? 0,
-    edges: stats.edges ?? 0,
-    communities: stats.communities,
-    clusters: aggregatedClusterCount,
-    processes: stats.processes,
-  };
-}
-
-async function materializeAIContext(
-  repoPath: string,
-  result: Pick<CoreAnalyzeResult, 'repoName' | 'stats' | 'pipelineResult'>,
-  options?: AnalyzeOptions,
-  generatedSkills?: GeneratedSkillInfo[],
-) {
-  const { generateAIContextFiles } = await import('./ai-context.js');
-  const { storagePath } = getStoragePaths(repoPath);
-  await generateAIContextFiles(
-    repoPath,
-    storagePath,
-    result.repoName,
-    buildAIContextStats(result),
-    generatedSkills,
-    { skipAgentsMd: options?.skipAgentsMd },
-  );
 }
 
 export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOptions) => {
@@ -143,7 +95,7 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
   }
 
   // KuzuDB migration cleanup is handled by runFullAnalysis internally.
-  // Note: repo-local AI context generation is handled here after runFullAnalysis.
+  // Note: --skills is handled after runFullAnalysis using the returned pipelineResult.
 
   if (process.env.GITNEXUS_NO_GITIGNORE) {
     console.log(
@@ -224,6 +176,7 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
         force: options?.force || options?.skills,
         embeddings: options?.embeddings,
         skipGit: options?.skipGit,
+        skipAgentsMd: options?.skipAgentsMd,
       },
       {
         onProgress: (_phase, percent, message) => {
@@ -233,7 +186,7 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
       },
     );
 
-    if (result.alreadyUpToDate && !options?.aiContext && !options?.skills) {
+    if (result.alreadyUpToDate) {
       clearInterval(elapsedTimer);
       process.removeListener('SIGINT', sigintHandler);
       console.log = origLog;
@@ -246,20 +199,12 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
       return;
     }
 
-    if (options?.aiContext && !options.skills) {
-      updateBar(99, 'Generating AI context files...');
-      try {
-        await materializeAIContext(repoPath, result, options);
-      } catch {
-        /* best-effort */
-      }
-    }
-
     // Skill generation (CLI-only, uses pipeline result from analysis)
     if (options?.skills && result.pipelineResult) {
       updateBar(99, 'Generating skill files...');
       try {
         const { generateSkillFiles } = await import('./skill-gen.js');
+        const { generateAIContextFiles } = await import('./ai-context.js');
         const skillResult = await generateSkillFiles(
           repoPath,
           result.repoName,
@@ -267,8 +212,37 @@ export const analyzeCommand = async (inputPath?: string, options?: AnalyzeOption
         );
         if (skillResult.skills.length > 0) {
           barLog(`  Generated ${skillResult.skills.length} skill files`);
+          // Re-generate AI context files now that we have skill info
+          const s = result.stats;
+          const communityResult = result.pipelineResult?.communityResult;
+          let aggregatedClusterCount = 0;
+          if (communityResult?.communities) {
+            const groups = new Map<string, number>();
+            for (const c of communityResult.communities) {
+              const label = c.heuristicLabel || c.label || 'Unknown';
+              groups.set(label, (groups.get(label) || 0) + c.symbolCount);
+            }
+            aggregatedClusterCount = Array.from(groups.values()).filter(
+              (count: number) => count >= 5,
+            ).length;
+          }
+          const { storagePath: sp } = getStoragePaths(repoPath);
+          await generateAIContextFiles(
+            repoPath,
+            sp,
+            result.repoName,
+            {
+              files: s.files ?? 0,
+              nodes: s.nodes ?? 0,
+              edges: s.edges ?? 0,
+              communities: s.communities,
+              clusters: aggregatedClusterCount,
+              processes: s.processes,
+            },
+            skillResult.skills,
+            { skipAgentsMd: options?.skipAgentsMd },
+          );
         }
-        await materializeAIContext(repoPath, result, options, skillResult.skills);
       } catch {
         /* best-effort */
       }

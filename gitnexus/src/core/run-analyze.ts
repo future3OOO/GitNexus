@@ -31,7 +31,7 @@ import {
   cleanupOldKuzuFiles,
 } from '../storage/repo-manager.js';
 import { getCurrentCommit, hasGitDir } from '../storage/git.js';
-import type { PipelineResult } from '../types/pipeline.js';
+import { generateAIContextFiles } from '../cli/ai-context.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -46,6 +46,8 @@ export interface AnalyzeOptions {
   force?: boolean;
   embeddings?: boolean;
   skipGit?: boolean;
+  /** Skip AGENTS.md and CLAUDE.md gitnexus block updates. */
+  skipAgentsMd?: boolean;
 }
 
 export interface AnalyzeResult {
@@ -61,7 +63,7 @@ export interface AnalyzeResult {
   };
   alreadyUpToDate?: boolean;
   /** The raw pipeline result — only populated when needed by callers (e.g. skill generation). */
-  pipelineResult?: PipelineResult;
+  pipelineResult?: any;
 }
 
 /** Threshold: auto-skip embeddings for repos with more nodes than this */
@@ -92,7 +94,7 @@ export const PHASE_LABELS: Record<string, string> = {
  *
  * This is the shared core extracted from the CLI `analyze` command. It
  * handles: pipeline execution, LadybugDB loading, FTS indexing, embedding
- * generation, and metadata persistence.
+ * generation, metadata persistence, and AI context file generation.
  *
  * The function communicates progress and log messages exclusively through
  * the {@link AnalyzeCallbacks} interface — it never writes to stdout/stderr
@@ -299,6 +301,37 @@ export async function runFullAnalysis(
     }
 
     const projectName = path.basename(repoPath);
+
+    // ── Generate AI context files (best-effort) ───────────────────────
+    let aggregatedClusterCount = 0;
+    if (pipelineResult.communityResult?.communities) {
+      const groups = new Map<string, number>();
+      for (const c of pipelineResult.communityResult.communities) {
+        const label = c.heuristicLabel || c.label || 'Unknown';
+        groups.set(label, (groups.get(label) || 0) + c.symbolCount);
+      }
+      aggregatedClusterCount = Array.from(groups.values()).filter((count) => count >= 5).length;
+    }
+
+    try {
+      await generateAIContextFiles(
+        repoPath,
+        storagePath,
+        projectName,
+        {
+          files: pipelineResult.totalFileCount,
+          nodes: stats.nodes,
+          edges: stats.edges,
+          communities: pipelineResult.communityResult?.stats.totalCommunities,
+          clusters: aggregatedClusterCount,
+          processes: pipelineResult.processResult?.stats.totalProcesses,
+        },
+        undefined,
+        { skipAgentsMd: options.skipAgentsMd },
+      );
+    } catch {
+      // Best-effort — don't fail the entire analysis for context file issues
+    }
 
     // ── Close LadybugDB ──────────────────────────────────────────────
     await closeLbug();
