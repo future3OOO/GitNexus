@@ -171,9 +171,15 @@ Stay on the current PR branch unless implementation complexity forces a regroup.
 - [x] Implement P3.
 - [x] Run P3 verification and update this checklist.
 - [ ] Run final repo gates.
-- [ ] Run `gitnexus_detect_changes({repo:"GitNexus",scope:"all"})`.
-- [ ] Commit and push the implementation.
+- [x] Run `gitnexus_detect_changes({repo:"GitNexus",scope:"all"})`.
+- [x] Commit and push the implementation.
 - [ ] Update the PR description / review threads only after the pushed branch is verified.
+
+## Current Verification Notes
+
+- P1, P2, and P3 targeted gates passed on the live branch.
+- `gitnexus_detect_changes({repo:"GitNexus",scope:"all"})` ran successfully after the implementation and showed the intended analyze/setup/hook process surface, with overall risk inflated by unrelated local `AGENTS.md` / `CLAUDE.md` dirt at the repo root.
+- Full-repo `npm test` and `npm run test:integration` did not produce a bounded completion signal in this environment, so the repo-wide final gate remains honestly open even though the targeted branch-relevant suites are green.
 
 ## Consolidation Trigger
 
