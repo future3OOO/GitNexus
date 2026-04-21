@@ -231,6 +231,10 @@ interface HookEntry {
   hooks?: Array<{ command?: string }> | unknown;
 }
 
+function isManagedHookCommand(command: unknown): boolean {
+  return typeof command === 'string' && command.replace(/\\/g, '/').includes('gitnexus-hook.cjs');
+}
+
 function ensureCommandHookEntry(
   existing: any,
   eventName: string,
@@ -246,16 +250,15 @@ function ensureCommandHookEntry(
     if (!entry || typeof entry !== 'object') return false;
     const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
     const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
-    return matcherMatches && hooks.some((hook) => hook?.command === hookCmd);
+    return matcherMatches && hooks.some((hook) => hook?.command === hookCmd || isManagedHookCommand(hook?.command));
   });
 
   if (existingEntry) {
     const hooks = Array.isArray(existingEntry.hooks) ? existingEntry.hooks : [];
-    existingEntry.hooks = hooks.map((hook) =>
-      hook.command === hookCmd
-        ? { ...hook, type: 'command', command: hookCmd, timeout, statusMessage }
-        : hook,
-    );
+    existingEntry.hooks = [
+      ...hooks.filter((hook) => !isManagedHookCommand(hook?.command)),
+      { type: 'command', command: hookCmd, timeout, statusMessage },
+    ];
     return;
   }
 

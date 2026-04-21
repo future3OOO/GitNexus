@@ -10,6 +10,10 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const AUGMENT_LOCK_DIR = 'codex-augment.lock';
+const AUGMENT_LOCK_OWNER = 'owner.json';
+const AUGMENT_LOCK_TTL_MS = 15000;
+const SAFE_AUGMENT_PATTERN_RE = /^[A-Za-z0-9_:@./-]{3,}$/;
 
 function readInput() {
   try {
@@ -92,7 +96,16 @@ function isSuccessfulBashResult(result) {
   return false;
 }
 
+function shouldAugmentPattern(pattern) {
+  if (!pattern || pattern.length < 3) return false;
+  // Hook-mode augmentation should stay on literal-ish tokens only. Regex-heavy rg
+  // patterns drive Ladybug FTS wildcard execution, which is currently unstable.
+  return SAFE_AUGMENT_PATTERN_RE.test(pattern);
+}
+
 function resolveCliPath() {
+  const envCliPath = process.env.GITNEXUS_CLI_PATH || '';
+  if (envCliPath) return envCliPath;
   let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');
   if (!fs.existsSync(cliPath)) {
     try {
@@ -130,9 +143,74 @@ function sendHookResponse(hookEventName, message) {
   );
 }
 
-function getSearchAugmentation(command, cwd) {
+function readAugmentLockOwner(lockDir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(lockDir, AUGMENT_LOCK_OWNER), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err && err.code === 'EPERM';
+  }
+}
+
+function removeAugmentLock(lockDir) {
+  try {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+  } catch {
+    /* best effort cleanup */
+  }
+}
+
+function shouldClearAugmentLock(lockDir, now) {
+  const owner = readAugmentLockOwner(lockDir);
+  if (owner && isProcessAlive(owner.pid)) return false;
+  if (owner) return true;
+
+  try {
+    const stat = fs.statSync(lockDir);
+    return now - stat.mtimeMs > AUGMENT_LOCK_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+function tryAcquireAugmentLock(gitNexusDir) {
+  const lockDir = path.join(gitNexusDir, AUGMENT_LOCK_DIR);
+  const now = Date.now();
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      fs.mkdirSync(lockDir);
+      fs.writeFileSync(
+        path.join(lockDir, AUGMENT_LOCK_OWNER),
+        JSON.stringify({ pid: process.pid, createdAt: now }),
+        'utf-8',
+      );
+      return () => removeAugmentLock(lockDir);
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') return null;
+      if (!shouldClearAugmentLock(lockDir, now)) return null;
+      removeAugmentLock(lockDir);
+    }
+  }
+
+  return null;
+}
+
+function getSearchAugmentation(command, cwd, gitNexusDir) {
   const searchPattern = extractPattern(command);
-  if (!searchPattern) return '';
+  if (!shouldAugmentPattern(searchPattern)) return '';
+
+  const releaseLock = tryAcquireAugmentLock(gitNexusDir);
+  if (!releaseLock) return '';
 
   const cliPath = resolveCliPath();
   let result = '';
@@ -143,6 +221,8 @@ function getSearchAugmentation(command, cwd) {
     }
   } catch {
     /* graceful failure */
+  } finally {
+    releaseLock();
   }
 
   return result && result.trim() ? result.trim() : '';
@@ -198,7 +278,7 @@ function handlePostToolUse(input) {
 
   const bashResult = extractBashResult(input);
   const messages = [
-    getSearchAugmentation(command, cwd),
+    getSearchAugmentation(command, cwd, gitNexusDir),
     getStaleIndexWarning(command, cwd, gitNexusDir, bashResult),
   ].filter(Boolean);
 

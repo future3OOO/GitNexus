@@ -17,6 +17,8 @@
 import path from 'path';
 import { listRegisteredRepos } from '../../storage/repo-manager.js';
 
+const SAFE_AUGMENT_PATTERN_RE = /^[A-Za-z0-9_:@./-]{3,}$/;
+
 /**
  * Find the best matching repo for a given working directory.
  * Matches by checking if cwd is within the repo's path.
@@ -85,6 +87,7 @@ async function findRepoForCwd(cwd: string): Promise<{
  */
 export async function augment(pattern: string, cwd?: string): Promise<string> {
   if (!pattern || pattern.length < 3) return '';
+  if (!SAFE_AUGMENT_PATTERN_RE.test(pattern)) return '';
 
   const workDir = cwd || process.cwd();
 

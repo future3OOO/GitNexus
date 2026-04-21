@@ -8,11 +8,21 @@ export function runHook(
   input: Record<string, any>,
   cwd?: string,
 ): { stdout: string; stderr: string; status: number | null } {
+  return runHookWithEnv(hookPath, input, undefined, cwd);
+}
+
+export function runHookWithEnv(
+  hookPath: string,
+  input: Record<string, any>,
+  env?: NodeJS.ProcessEnv,
+  cwd?: string,
+): { stdout: string; stderr: string; status: number | null } {
   const result = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf-8',
     timeout: 10000,
     cwd,
+    env: env ? { ...process.env, ...env } : process.env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   return {

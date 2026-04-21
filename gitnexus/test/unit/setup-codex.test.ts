@@ -259,6 +259,49 @@ describe('setupCommand codex execution', () => {
     );
   });
 
+  it('replaces stale managed Codex hook paths instead of appending a duplicate entry', async () => {
+    await fs.mkdir(path.join(tempHome, '.codex', 'hooks', 'legacy'), { recursive: true });
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'hooks.json'),
+      JSON.stringify(
+        {
+          hooks: {
+            PostToolUse: [
+              {
+                matcher: 'Bash',
+                hooks: [
+                  {
+                    type: 'command',
+                    command: `node "${path.join(tempHome, '.codex', 'hooks', 'legacy', 'gitnexus-hook.cjs').replace(/\\/g, '/')}"`,
+                    timeout: 10,
+                    statusMessage: 'Old message',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await setupCommand();
+
+    const hooksJson = JSON.parse(await fs.readFile(path.join(tempHome, '.codex', 'hooks.json'), 'utf-8'));
+    expect(hooksJson.hooks.PostToolUse).toHaveLength(1);
+    expect(hooksJson.hooks.PostToolUse[0].hooks).toHaveLength(1);
+    expect(hooksJson.hooks.PostToolUse[0].hooks[0].command).toContain(
+      '/.codex/hooks/gitnexus/gitnexus-hook.cjs',
+    );
+    expect(hooksJson.hooks.PostToolUse[0].hooks[0].statusMessage).toBe(
+      'Reviewing Bash output with GitNexus...',
+    );
+  });
+
   it('repairs malformed existing Codex hook entries without throwing', async () => {
     await fs.writeFile(
       path.join(tempHome, '.codex', 'hooks.json'),

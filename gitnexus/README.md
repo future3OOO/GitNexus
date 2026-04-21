@@ -66,12 +66,23 @@ claude mcp add gitnexus -- cmd /c npx -y gitnexus@latest mcp
 codex mcp add gitnexus -- npx -y gitnexus@latest mcp
 ```
 
+For Codex on WSL, prefer `gitnexus setup` or a global `gitnexus` binary over
+manual `npx` wiring. `gitnexus setup` writes the faster binary-first MCP
+command when one is available, which avoids the slow cold `npx` path that can
+destabilize startup under WSL.
+
 `gitnexus setup` also enables `features.codex_hooks = true`, installs a global
 `~/.codex/hooks.json`, and copies a dedicated Codex GitNexus hook into
 `~/.codex/hooks/gitnexus/`. It also installs a GitNexus section into the global
 `~/.codex/AGENTS.md` so Codex has persistent workflow guidance and skill
-references. Current Codex hooks can enrich Bash-based search commands (for
-example `rg` / `grep`) and warn when git mutations make the index stale.
+references. Current Codex hooks only enrich literal-ish Bash search patterns
+(for example simple `rg` / `grep` tokens). Regex-heavy or wildcard search
+patterns are skipped intentionally, and overlapping Bash events may also skip
+augmentation while another GitNexus augment run is already in flight. Stale
+index warnings are emitted for successful `git commit`, `git merge`,
+`git rebase`, `git cherry-pick`, and `git pull` commands. Hooks can also stay
+silent when Codex does not provide a parseable Bash result payload, the working
+directory is not an absolute path, or the current repo is not indexed.
 
 ### Cursor / Windsurf
 

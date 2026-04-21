@@ -21,7 +21,7 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { runHook, parseHookOutput } from '../utils/hook-test-helpers.js';
+import { runHook, runHookWithEnv, parseHookOutput } from '../utils/hook-test-helpers.js';
 
 // ─── Paths to both hook variants ────────────────────────────────────
 
@@ -41,6 +41,9 @@ const PLUGIN_HOOK = path.resolve(
 
 let tmpDir: string;
 let gitNexusDir: string;
+let fakeCliPath: string;
+let augmentLockDir: string;
+let augmentLockOwnerPath: string;
 
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitnexus-hook-test-'));
@@ -54,6 +57,21 @@ beforeAll(() => {
   fs.writeFileSync(path.join(tmpDir, 'dummy.txt'), 'hello');
   spawnSync('git', ['add', '.'], { cwd: tmpDir, stdio: 'pipe' });
   spawnSync('git', ['commit', '-m', 'init'], { cwd: tmpDir, stdio: 'pipe' });
+  augmentLockDir = path.join(gitNexusDir, 'codex-augment.lock');
+  augmentLockOwnerPath = path.join(augmentLockDir, 'owner.json');
+
+  fakeCliPath = path.join(tmpDir, 'fake-gitnexus-cli.cjs');
+  fs.writeFileSync(
+    fakeCliPath,
+    [
+      '#!/usr/bin/env node',
+      "if (process.argv[2] === 'augment') {",
+      "  process.stderr.write('FAKE_AUGMENT_OUTPUT');",
+      '}',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
 });
 
 afterAll(() => {
@@ -559,6 +577,103 @@ describe('PostToolUse Codex payload support (integration)', () => {
     const output = parseHookOutput(result.stdout);
     expect(output).not.toBeNull();
     expect(output!.additionalContext).toContain('stale');
+  });
+});
+
+describe('Codex search augmentation safety', () => {
+  it('Codex hook augments plain literal rg patterns', () => {
+    const result = runHookWithEnv(
+      CODEX_HOOK,
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'rg landlord src' },
+        tool_response: JSON.stringify({ exitCode: 0 }),
+        cwd: tmpDir,
+      },
+      { GITNEXUS_CLI_PATH: fakeCliPath },
+    );
+
+    const output = parseHookOutput(result.stdout);
+    expect(result.status).toBe(0);
+    expect(output).not.toBeNull();
+    expect(output!.hookEventName).toBe('PostToolUse');
+    expect(output!.additionalContext).toContain('FAKE_AUGMENT_OUTPUT');
+  });
+
+  it('Codex hook skips regex-heavy rg patterns that would drive wildcard FTS', () => {
+    const result = runHookWithEnv(
+      CODEX_HOOK,
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: "rg 'run_tapi_action|/api/.*/actions' src" },
+        tool_response: JSON.stringify({ exitCode: 0 }),
+        cwd: tmpDir,
+      },
+      { GITNEXUS_CLI_PATH: fakeCliPath },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook skips augmentation while the recorded lock owner is still alive', () => {
+    fs.mkdirSync(augmentLockDir, { recursive: true });
+    fs.writeFileSync(
+      augmentLockOwnerPath,
+      JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+      'utf-8',
+    );
+
+    try {
+      const result = runHookWithEnv(
+        CODEX_HOOK,
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'rg landlord src' },
+          tool_response: JSON.stringify({ exitCode: 0 }),
+          cwd: tmpDir,
+        },
+        { GITNEXUS_CLI_PATH: fakeCliPath },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('');
+    } finally {
+      fs.rmSync(augmentLockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Codex hook clears abandoned augment locks owned by dead processes', () => {
+    fs.mkdirSync(augmentLockDir, { recursive: true });
+    fs.writeFileSync(
+      augmentLockOwnerPath,
+      JSON.stringify({ pid: 999999, createdAt: Date.now() - 30000 }),
+      'utf-8',
+    );
+
+    try {
+      const result = runHookWithEnv(
+        CODEX_HOOK,
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'rg landlord src' },
+          tool_response: JSON.stringify({ exitCode: 0 }),
+          cwd: tmpDir,
+        },
+        { GITNEXUS_CLI_PATH: fakeCliPath },
+      );
+
+      const output = parseHookOutput(result.stdout);
+      expect(result.status).toBe(0);
+      expect(output).not.toBeNull();
+      expect(output!.additionalContext).toContain('FAKE_AUGMENT_OUTPUT');
+    } finally {
+      fs.rmSync(augmentLockDir, { recursive: true, force: true });
+    }
   });
 });
 
