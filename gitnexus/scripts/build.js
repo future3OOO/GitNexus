@@ -18,18 +18,19 @@ const ROOT = path.resolve(__dirname, '..');
 const SHARED_ROOT = path.resolve(ROOT, '..', 'gitnexus-shared');
 const DIST = path.join(ROOT, 'dist');
 const SHARED_DEST = path.join(DIST, '_shared');
-const LOCAL_TSC = path.join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 
 function runTsc(cwd) {
-  if (fs.existsSync(LOCAL_TSC)) {
-    execSync(`${JSON.stringify(process.execPath)} ${JSON.stringify(LOCAL_TSC)}`, {
+  const localTsc = path.join(cwd, 'node_modules', 'typescript', 'bin', 'tsc');
+
+  if (fs.existsSync(localTsc)) {
+    execSync(`${JSON.stringify(process.execPath)} ${JSON.stringify(localTsc)}`, {
       cwd,
       stdio: 'inherit',
     });
     return;
   }
 
-  execSync('npx -y typescript tsc', { cwd, stdio: 'inherit' });
+  execSync('npx -y --package=typescript -- tsc', { cwd, stdio: 'inherit' });
 }
 
 // ── 1. Build gitnexus-shared ───────────────────────────────────────

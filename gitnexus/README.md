@@ -60,7 +60,7 @@ claude mcp add gitnexus -- npx -y gitnexus@latest mcp
 claude mcp add gitnexus -- cmd /c npx -y gitnexus@latest mcp
 ```
 
-### Codex (MCP + skills + global Bash hooks)
+### Codex (manual MCP command)
 
 ```bash
 codex mcp add gitnexus -- npx -y gitnexus@latest mcp
@@ -71,7 +71,8 @@ manual `npx` wiring. `gitnexus setup` writes the faster binary-first MCP
 command when one is available, which avoids the slow cold `npx` path that can
 destabilize startup under WSL.
 
-`gitnexus setup` also enables `features.codex_hooks = true`, installs a global
+Unlike the manual command above, `gitnexus setup` also enables
+`features.codex_hooks = true`, installs a global
 `~/.codex/hooks.json`, and copies a dedicated Codex GitNexus hook into
 `~/.codex/hooks/gitnexus/`. It also installs a GitNexus section into the global
 `~/.codex/AGENTS.md` so Codex has persistent workflow guidance and skill

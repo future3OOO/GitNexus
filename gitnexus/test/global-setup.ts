@@ -8,16 +8,36 @@
  * The dbPath is shared with test files via vitest's provide/inject API.
  */
 import path from 'path';
+import fs from 'fs';
+import { execSync } from 'child_process';
 import lbug from '@ladybugdb/core';
 import type { GlobalSetupContext } from 'vitest/node';
+import { fileURLToPath } from 'url';
 import { createTempDir } from './helpers/test-db.js';
-import {
-  NODE_SCHEMA_QUERIES,
-  REL_SCHEMA_QUERIES,
-  EMBEDDING_SCHEMA,
-} from '../src/core/lbug/schema.js';
+
+async function ensureSharedPackageBuilt(): Promise<void> {
+  const testDir = path.dirname(fileURLToPath(import.meta.url));
+  const sharedRoot = path.resolve(testDir, '..', '..', 'gitnexus-shared');
+  const distEntry = path.join(sharedRoot, 'dist', 'index.js');
+  if (fs.existsSync(distEntry)) return;
+
+  const localTsc = path.join(sharedRoot, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (fs.existsSync(localTsc)) {
+    execSync(`${JSON.stringify(process.execPath)} ${JSON.stringify(localTsc)}`, {
+      cwd: sharedRoot,
+      stdio: 'inherit',
+    });
+    return;
+  }
+
+  execSync('npx -y --package=typescript -- tsc', { cwd: sharedRoot, stdio: 'inherit' });
+}
 
 export default async function setup({ provide }: GlobalSetupContext) {
+  await ensureSharedPackageBuilt();
+  const { NODE_SCHEMA_QUERIES, REL_SCHEMA_QUERIES, EMBEDDING_SCHEMA } = await import(
+    '../src/core/lbug/schema.js'
+  );
   const tmpHandle = await createTempDir('gitnexus-shared-');
   const dbPath = path.join(tmpHandle.dbPath, 'lbug');
 

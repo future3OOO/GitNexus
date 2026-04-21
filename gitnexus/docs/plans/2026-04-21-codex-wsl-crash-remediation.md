@@ -2,9 +2,9 @@
 
 Date: 2026-04-21
 Owner: takeover agent
-Checkout: `/home/prop_/projects/GitNexus-pr1-review/gitnexus`
-Branch: `pr1-live`
-Head: `abbad8544315330adc8ce08fc23aff1f9be5e7ac`
+Checkout: `<review-worktree>/gitnexus`
+Branch: `codex/add-global-codex-hooks`
+Head: `e1ee2016aef3f24c4aea792563b036a783fbd53a`
 
 ## Goal
 

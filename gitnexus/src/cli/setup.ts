@@ -32,6 +32,16 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function hasTomlSection(content: string, sectionName: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .some((line) =>
+      new RegExp(
+        `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*(?:[#;].*)?)?$`,
+      ).test(line),
+    );
+}
+
 /**
  * Resolve the absolute path to the `gitnexus` binary if it's installed
  * globally (or via npm -g / yarn global). Returns null when not found.
@@ -418,7 +428,7 @@ function upsertTomlKey(content: string, sectionName: string, key: string, value:
   const eol = content.includes('\r\n') ? '\r\n' : '\n';
   const line = `${key} = ${value}`;
   const sectionHeaderRegex = new RegExp(
-    `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*[#;].*)?$`,
+    `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*(?:[#;].*)?)?$`,
   );
   const anySectionRegex = /^\s*\[[^\]]+\]/;
   const keyLineRegex = new RegExp(`^(\\s*)${escapeRegExp(key)}\\s*=.*$`);
@@ -463,7 +473,7 @@ async function upsertCodexConfigToml(configPath: string): Promise<void> {
   }
 
   let nextContent = existing;
-  if (!nextContent.includes('[mcp_servers.gitnexus]')) {
+  if (!hasTomlSection(nextContent, 'mcp_servers.gitnexus')) {
     const section = getCodexMcpTomlSection();
     nextContent =
       nextContent.trim().length > 0 ? `${nextContent.trimEnd()}\n\n${section}` : section;

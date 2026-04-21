@@ -15,7 +15,7 @@ The recurring WSL failures were not caused by Codex log growth. The large disk u
 
 2. Crashing process
 
-- Crashed command: `/usr/bin/node /home/prop_/projects/GitNexus/gitnexus/dist/cli/index.js augment ...`
+- Crashed command: `/usr/bin/node <main-checkout>/gitnexus/dist/cli/index.js augment ...`
 - Conclusion: GitNexus `augment` is the failing process, not the Codex UI.
 
 3. Repro shape
@@ -37,9 +37,9 @@ The recurring WSL failures were not caused by Codex log growth. The large disk u
 
 5. Exact source path
 
-- Extensions source: `/tmp/ladybug-ext/fts/src/function/query_fts_index.cpp`
-- Ladybug source: `/tmp/ladybug-src/src/function/gds/gds_task.cpp`
-- Ladybug source: `/tmp/ladybug-src/src/function/gds/gds_utils.cpp`
+- Extensions source: `<extensions-checkout>/fts/src/function/query_fts_index.cpp`
+- Ladybug source: `<ladybug-checkout>/src/function/gds/gds_task.cpp`
+- Ladybug source: `<ladybug-checkout>/src/function/gds/gds_utils.cpp`
 
 ## Why The Shared `resDfs` Map Is The Strongest Root Cause
 
@@ -80,7 +80,7 @@ Both current upstream branches still contain:
 
 The live Codex hook was sourced from the Codex hook copy in:
 
-- `/home/prop_/projects/GitNexus-pr1-review/gitnexus/hooks/codex/gitnexus-hook.cjs`
+- `<review-worktree>/gitnexus/hooks/codex/gitnexus-hook.cjs`
 
 not from the main checkout’s Claude hook. That matters because the Codex hook runs on Bash `PostToolUse` and was invoking `augment` for regex-heavy `rg` usage in normal Codex workflows, including delegated-agent searches.
 
@@ -102,11 +102,10 @@ Proven:
 Not yet proven:
 
 - a rebuilt patched Ladybug extension that eliminates the hang/crash
-- a green repo Vitest path; current test runner is still blocked by unrelated `gitnexus-shared` package resolution
 
 Reason for the remaining gap:
 
-- this environment does not currently have `cmake`, so a local upstream rebuild/proof patch was not completed in this pass
+- this environment does not currently have a compiler toolchain, so a local upstream rebuild/proof patch was not completed in this pass
 
 ## Recommended Next Action
 

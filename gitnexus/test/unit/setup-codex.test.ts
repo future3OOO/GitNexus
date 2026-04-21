@@ -196,6 +196,43 @@ describe('setupCommand codex execution', () => {
     expect(codexConfig).not.toContain('codex_hooks = false');
   });
 
+  it('updates features headers with trailing whitespace instead of appending a duplicate section', async () => {
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'config.toml'),
+      '[features]   \ncodex_hooks = false\n',
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await setupCommand();
+
+    const codexConfig = await fs.readFile(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(codexConfig.match(/\[features\]/g)).toHaveLength(1);
+    expect(codexConfig).toContain('codex_hooks = true');
+    expect(codexConfig).not.toContain('codex_hooks = false');
+  });
+
+  it('adds the GitNexus MCP table when config only contains a commented header mention', async () => {
+    await fs.writeFile(
+      path.join(tempHome, '.codex', 'config.toml'),
+      '# [mcp_servers.gitnexus]\n[features]\ncodex_hooks = false\n',
+      'utf-8',
+    );
+
+    const { setupCommand } = await import('../../src/cli/setup.js');
+
+    await setupCommand();
+
+    const codexConfig = await fs.readFile(path.join(tempHome, '.codex', 'config.toml'), 'utf-8');
+    expect(
+      codexConfig
+        .split(/\r?\n/)
+        .filter((line) => /^\s*\[mcp_servers\.gitnexus\](?:\s*(?:[#;].*)?)?$/.test(line)),
+    ).toHaveLength(1);
+    expect(codexConfig).toContain('codex_hooks = true');
+  });
+
   it('repairs malformed hook buckets instead of throwing', async () => {
     await fs.writeFile(
       path.join(tempHome, '.codex', 'hooks.json'),
