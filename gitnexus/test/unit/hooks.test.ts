@@ -45,6 +45,18 @@ let fakeCliPath: string;
 let augmentLockDir: string;
 let augmentLockOwnerPath: string;
 
+function findDeadPid(start = 999999): number {
+  for (let pid = start; pid < start + 10000; pid++) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+      if (code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('Could not find an unused pid for abandoned-lock test');
+}
+
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitnexus-hook-test-'));
   gitNexusDir = path.join(tmpDir, '.gitnexus');
@@ -650,7 +662,7 @@ describe('Codex search augmentation safety', () => {
     fs.mkdirSync(augmentLockDir, { recursive: true });
     fs.writeFileSync(
       augmentLockOwnerPath,
-      JSON.stringify({ pid: 999999, createdAt: Date.now() - 30000 }),
+      JSON.stringify({ pid: findDeadPid(), createdAt: Date.now() - 30000 }),
       'utf-8',
     );
 
