@@ -90,6 +90,16 @@ function setupNoRepos() {
   (listRegisteredRepos as any).mockResolvedValue([]);
 }
 
+function setupStaleGitRepo() {
+  (listRegisteredRepos as any).mockResolvedValue([
+    {
+      ...MOCK_REPO_ENTRY,
+      path: process.cwd(),
+      lastCommit: 'not-a-real-commit-hash',
+    },
+  ]);
+}
+
 // ─── LocalBackend lifecycle ──────────────────────────────────────────
 
 describe('LocalBackend.init', () => {
@@ -157,6 +167,30 @@ describe('LocalBackend.callTool', () => {
     const result = await backend.callTool('list_repos', {});
     expect(Array.isArray(result)).toBe(true);
     expect(result[0].name).toBe('test-project');
+  });
+
+  it.each([
+    ['query', { query: 'auth' }],
+    ['cypher', { query: 'MATCH (n:Function) RETURN n.name LIMIT 1' }],
+    ['overview', {}],
+    ['context', { name: 'main' }],
+    ['impact', { target: 'main', direction: 'upstream' }],
+    ['detect_changes', { scope: 'unstaged' }],
+    ['rename', { symbol_name: 'oldName', new_name: 'newName', dry_run: true }],
+    ['route_map', {}],
+    ['shape_check', {}],
+    ['tool_map', {}],
+    ['api_impact', { route: '/api/grants' }],
+  ])('blocks graph tool %s when the index commit is stale', async (method, params) => {
+    backend = new LocalBackend();
+    setupStaleGitRepo();
+    await backend.init();
+
+    await expect(backend.callTool(method, params)).rejects.toThrow('GitNexus index is stale');
+    expect(initLbug).not.toHaveBeenCalled();
+
+    const repos = await backend.callTool('list_repos', {});
+    expect(repos[0].lastCommit).toBe('not-a-real-commit-hash');
   });
 
   it('throws for unknown tool name', async () => {

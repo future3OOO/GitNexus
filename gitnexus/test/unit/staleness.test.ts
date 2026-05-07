@@ -64,4 +64,11 @@ describe('checkStaleness', () => {
     expect(result.isStale).toBe(false);
     expect(result.commitsBehind).toBe(0);
   });
+
+  it('fails closed with invalid commit hash in strict mode', () => {
+    const result = checkStaleness(process.cwd(), 'not-a-real-commit-hash', { strict: true });
+    expect(result.isStale).toBe(true);
+    expect(result.indexedCommit).toBe('not-a-real-commit-hash');
+    expect(result.hint).toContain('gitnexus analyze');
+  });
 });

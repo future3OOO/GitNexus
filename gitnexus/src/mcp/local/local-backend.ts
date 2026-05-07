@@ -1,11 +1,3 @@
-/**
- * Local Backend (Multi-Repo)
- *
- * Provides tool implementations using local .gitnexus/ indexes.
- * Supports multiple indexed repositories via a global registry.
- * LadybugDB connections are opened lazily per repo on first query.
- */
-
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -19,16 +11,14 @@ import {
 export { isWriteQuery };
 // Embedding imports are lazy (dynamic import) to avoid loading onnxruntime-node
 // at MCP server startup — crashes on unsupported Node ABI versions (#89)
-// git utilities available if needed
-// import { isGitRepo, getCurrentCommit, getGitRoot } from '../../storage/git.js';
 import {
   listRegisteredRepos,
   cleanupOldKuzuFiles,
   type RegistryEntry,
 } from '../../storage/repo-manager.js';
+import { isGitRepo } from '../../storage/git.js';
+import { checkStaleness } from '../../core/git-staleness.js';
 import { GroupService, type GroupToolPort } from '../../core/group/service.js';
-// AI context generation is CLI-only (gitnexus analyze)
-// import { generateAIContextFiles } from '../../cli/ai-context.js';
 
 /**
  * Quick test-file detection for filtering impact results.
@@ -275,10 +265,6 @@ export class LocalBackend {
     }
   }
 
-  /**
-   * Generate a stable repo ID from name + path.
-   * If names collide, append a hash of the path.
-   */
   private repoId(name: string, repoPath: string): string {
     const base = name.toLowerCase();
     // Check for name collision with a different path
@@ -359,15 +345,28 @@ export class LocalBackend {
     return null; // Multiple repos, no param — ambiguous
   }
 
-  // ─── Lazy LadybugDB Init ────────────────────────────────────────────
-
   private async ensureInitialized(repoId: string): Promise<void> {
     // If a reinit is already in progress for this repo, wait for it
     const pending = this.reinitPromises.get(repoId);
     if (pending) return pending;
 
-    const handle = this.repos.get(repoId);
+    let handle = this.repos.get(repoId);
     if (!handle) throw new Error(`Unknown repo: ${repoId}`);
+    if (isGitRepo(handle.repoPath)) {
+      let staleness = checkStaleness(handle.repoPath, handle.lastCommit, { strict: true });
+      if (staleness.isStale) {
+        await this.refreshRepos();
+        handle = this.repos.get(repoId) ?? handle;
+        staleness = checkStaleness(handle.repoPath, handle.lastCommit, { strict: true });
+        if (staleness.isStale) {
+          const indexed = staleness.indexedCommit || handle.lastCommit || 'unknown';
+          const current = staleness.currentCommit || 'unknown';
+          throw new Error(
+            `GitNexus index is stale for ${handle.name}. Indexed: ${indexed.slice(0, 7)}. Current HEAD: ${current.slice(0, 7)}. Run: gitnexus analyze`,
+          );
+        }
+      }
+    }
 
     // Check if the index was rebuilt since we opened the connection (#297).
     // Throttle staleness checks to at most once per 5 seconds per repo to
@@ -1908,7 +1907,7 @@ export class LocalBackend {
     try {
       return await this._impactImpl(repo, params);
     } catch (err: any) {
-      // Return structured error instead of crashing (#321)
+      if (err instanceof Error && err.message.startsWith('GitNexus index is stale')) throw err;
       return {
         error: (err instanceof Error ? err.message : String(err)) || 'Impact analysis failed',
         target: { name: params.target },
