@@ -345,15 +345,15 @@ export async function generateAIContextFiles(
     const claudePath = path.join(repoPath, 'CLAUDE.md');
     const claudeResult = await upsertGitNexusSection(claudePath, content);
     createdFiles.push(`CLAUDE.md (${claudeResult})`);
+
+    const installedSkills = await installSkills(repoPath);
+    if (installedSkills.length > 0) {
+      createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
+    }
   } else {
     createdFiles.push('AGENTS.md (skipped via --skip-agents-md)');
     createdFiles.push('CLAUDE.md (skipped via --skip-agents-md)');
-  }
-
-  // Install skills to .claude/skills/gitnexus/
-  const installedSkills = await installSkills(repoPath);
-  if (installedSkills.length > 0) {
-    createdFiles.push(`.claude/skills/gitnexus/ (${installedSkills.length} skills)`);
+    createdFiles.push('.claude/skills/gitnexus/ (skipped via --skip-agents-md)');
   }
 
   return { files: createdFiles };
