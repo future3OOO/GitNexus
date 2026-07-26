@@ -93,6 +93,34 @@ describe('isWriteQuery', () => {
     expect(isWriteQuery('')).toBe(false);
   });
 
+  // A write keyword inside a quoted literal is search text, not a clause.
+  // FTS embeds the user's search terms in the Cypher it builds, so treating
+  // them as write operations silently empties any search containing a word
+  // like "merge" or "set".
+  it('ignores write keywords inside quoted string literals', () => {
+    expect(
+      isWriteQuery(
+        "CALL QUERY_FTS_INDEX('Function', 'function_fts', 'merge projection', conjunctive := false) RETURN node, score",
+      ),
+    ).toBe(false);
+    expect(
+      isWriteQuery(
+        "CALL QUERY_FTS_INDEX('Function', 'function_fts', 'row write lock merge', conjunctive := false) RETURN node, score",
+      ),
+    ).toBe(false);
+    expect(isWriteQuery("MATCH (n) WHERE n.name = 'create_user' RETURN n")).toBe(false);
+  });
+
+  it('still blocks real write clauses outside literals', () => {
+    expect(isWriteQuery("MERGE (n:Node {name: 'harmless'})")).toBe(true);
+    expect(isWriteQuery("MATCH (n) WHERE n.name = 'merge' DELETE n")).toBe(true);
+    expect(isWriteQuery("MATCH (n) SET n.name = 'merge'")).toBe(true);
+  });
+
+  it('handles doubled single quotes inside literals', () => {
+    expect(isWriteQuery("MATCH (n) WHERE n.name = 'it''s merge' RETURN n")).toBe(false);
+  });
+
   // Hardening: regex lastIndex not stuck (non-global regex, but verify)
   it('works correctly on consecutive calls', () => {
     expect(isWriteQuery('CREATE (n)')).toBe(true);

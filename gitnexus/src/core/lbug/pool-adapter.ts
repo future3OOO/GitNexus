@@ -577,7 +577,15 @@ export const isLbugReady = (repoId: string): boolean => pool.has(repoId);
 export const CYPHER_WRITE_RE =
   /(?<!:)\b(CREATE|DELETE|SET|MERGE|REMOVE|DROP|ALTER|COPY|DETACH|FOREACH|INSTALL|LOAD)\b/i;
 
+/** Blank out quoted string literals, so text inside them is never parsed as
+ * Cypher. FTS embeds the caller's search terms in the query it builds
+ * (CALL QUERY_FTS_INDEX(..., 'merge projection', ...)), and without this a
+ * search for a word like "merge" or "set" is rejected as a write operation
+ * and silently returns no results. */
+const stripStringLiterals = (query: string): string =>
+  query.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"/g, "''");
+
 /** Check if a Cypher query contains write operations */
 export function isWriteQuery(query: string): boolean {
-  return CYPHER_WRITE_RE.test(query);
+  return CYPHER_WRITE_RE.test(stripStringLiterals(query));
 }
