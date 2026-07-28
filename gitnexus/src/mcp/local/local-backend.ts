@@ -790,45 +790,43 @@ export class LocalBackend {
 
     const results: any[] = [];
 
+    // BM25 ranks whole files, so arbitrary nodes can be returned in place of the
+    // symbol the caller named. Single identifiers only; multi-term is unchanged.
+    const wanted = /^[A-Za-z0-9_]+$/.test(query.trim()) ? query.trim() : '';
     for (const bm25Result of bm25Results) {
       const fullPath = bm25Result.filePath;
+      let symbols: Record<string, unknown>[] = [];
       try {
-        const symbols = await executeParameterized(
+        symbols = await executeParameterized(
           repo.id,
           `
           MATCH (n)
           WHERE n.filePath = $filePath
           RETURN n.id AS id, n.name AS name, labels(n)[0] AS type, n.filePath AS filePath, n.startLine AS startLine, n.endLine AS endLine
+          ${wanted ? 'ORDER BY CASE WHEN n.name = $name THEN 0 ELSE 1 END' : ''}
           LIMIT 3
         `,
-          { filePath: fullPath },
+          wanted ? { filePath: fullPath, name: wanted } : { filePath: fullPath },
         );
+      } catch {
+        symbols = [];
+      }
 
-        if (symbols.length > 0) {
-          for (const sym of symbols) {
-            results.push({
-              nodeId: sym.id || sym[0],
-              name: sym.name || sym[1],
-              type: sym.type || sym[2],
-              filePath: sym.filePath || sym[3],
-              startLine: sym.startLine || sym[4],
-              endLine: sym.endLine || sym[5],
-              bm25Score: bm25Result.score,
-            });
-          }
-        } else {
-          const fileName = fullPath.split('/').pop() || fullPath;
+      if (symbols.length > 0) {
+        for (const sym of symbols) {
           results.push({
-            name: fileName,
-            type: 'File',
-            filePath: bm25Result.filePath,
+            nodeId: sym.id || sym[0],
+            name: sym.name || sym[1],
+            type: sym.type || sym[2],
+            filePath: sym.filePath || sym[3],
+            startLine: sym.startLine || sym[4],
+            endLine: sym.endLine || sym[5],
             bm25Score: bm25Result.score,
           });
         }
-      } catch {
-        const fileName = fullPath.split('/').pop() || fullPath;
+      } else {
         results.push({
-          name: fileName,
+          name: fullPath.split('/').pop() || fullPath,
           type: 'File',
           filePath: bm25Result.filePath,
           bm25Score: bm25Result.score,
