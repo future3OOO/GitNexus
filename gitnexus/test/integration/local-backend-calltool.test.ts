@@ -92,6 +92,25 @@ withTestLbugDB(
         expect(depNames).toContain('login');
       });
 
+      it('impact tool uses the UID resolved by context for duplicate symbol names', async () => {
+        const context = await backend.callTool('context', {
+          name: 'authenticate',
+          file_path: 'src/base.ts',
+        });
+
+        expect(context.status).toBe('found');
+        expect(context.symbol.filePath).toBe('src/base.ts');
+
+        const result = await backend.callTool('impact', {
+          uid: context.symbol.uid,
+          direction: 'downstream',
+        });
+
+        expect(result).not.toHaveProperty('error');
+        expect(result.target.id).toBe(context.symbol.uid);
+        expect(result.target.filePath).toBe('src/base.ts');
+      });
+
       it('query tool returns results for keyword search', async () => {
         const result = await backend.callTool('query', { query: 'login' });
         expect(result).not.toHaveProperty('error');

@@ -109,23 +109,27 @@ export async function contextCommand(
 }
 
 export async function impactCommand(
-  target: string,
+  target: string | undefined,
   options?: {
     direction?: string;
     repo?: string;
     depth?: string;
     includeTests?: boolean;
+    uid?: string;
   },
 ): Promise<void> {
-  if (!target?.trim()) {
-    console.error('Usage: gitnexus impact <symbol_name> [--direction upstream|downstream]');
+  if (!target?.trim() && !options?.uid?.trim()) {
+    console.error(
+      'Usage: gitnexus impact <symbol_name> [--uid <uid>] [--direction upstream|downstream]',
+    );
     process.exit(1);
   }
 
   try {
     const backend = await getBackend();
     const result = await backend.callTool('impact', {
-      target,
+      target: target || undefined,
+      uid: options?.uid,
       direction: options?.direction || 'upstream',
       maxDepth: options?.depth ? parseInt(options.depth, 10) : undefined,
       includeTests: options?.includeTests ?? false,
@@ -138,7 +142,7 @@ export async function impactCommand(
     output({
       error:
         (err instanceof Error ? err.message : String(err)) || 'Impact analysis failed unexpectedly',
-      target: { name: target },
+      target: options?.uid ? { id: options.uid } : { name: target },
       direction: options?.direction || 'upstream',
       suggestion: 'Try reducing --depth or using gitnexus context <symbol> as a fallback',
     });

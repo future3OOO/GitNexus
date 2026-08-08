@@ -473,8 +473,30 @@ export class LocalBackend {
       }
       case 'context':
         return this.context(repo, params);
-      case 'impact':
+      case 'impact': {
+        if (params?.uid) {
+          const result = await this.impactByUid(repo.id, params.uid, params.direction, {
+            maxDepth: params.maxDepth || 3,
+            relationTypes: params.relationTypes || [],
+            minConfidence: params.minConfidence ?? 0,
+            includeTests: params.includeTests ?? false,
+          });
+          return (
+            result || {
+              error: 'UID impact analysis failed',
+              target: { id: params.uid },
+              direction: params.direction,
+              impactedCount: 0,
+              risk: 'UNKNOWN',
+              suggestion: 'Resolve the symbol again with gitnexus context --uid <uid>',
+            }
+          );
+        }
+        if (!params?.target) {
+          return { error: 'Impact target or UID is required' };
+        }
         return this.impact(repo, params);
+      }
       case 'detect_changes':
         return this.detectChanges(repo, params);
       case 'rename':

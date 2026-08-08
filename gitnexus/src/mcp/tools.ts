@@ -21,6 +21,7 @@ export interface ToolDefinition {
       }
     >;
     required: string[];
+    anyOf?: Array<{ required: string[] }>;
   };
 }
 
@@ -271,6 +272,10 @@ Confidence: 1.0 = certain, <0.8 = fuzzy match`,
       type: 'object',
       properties: {
         target: { type: 'string', description: 'Name of function, class, or file to analyze' },
+        uid: {
+          type: 'string',
+          description: 'Direct symbol UID from prior context results (zero-ambiguity)',
+        },
         direction: {
           type: 'string',
           description: 'upstream (what depends on this) or downstream (what this depends on)',
@@ -293,7 +298,8 @@ Confidence: 1.0 = certain, <0.8 = fuzzy match`,
           description: 'Repository name or path. Omit if only one repo is indexed.',
         },
       },
-      required: ['target', 'direction'],
+      required: ['direction'],
+      anyOf: [{ required: ['target'] }, { required: ['uid'] }],
     },
   },
   {
