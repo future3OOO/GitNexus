@@ -389,8 +389,6 @@ describe('CLI end-to-end', () => {
         ['context', 'validateInput', '--file', 'src/validator.ts', '--repo', 'mini-repo'],
         MINI_REPO,
       );
-      if (contextResult.status === null) return;
-
       expect(contextResult.status).toBe(0);
       const context = JSON.parse(contextResult.stdout.trim());
 
@@ -398,8 +396,6 @@ describe('CLI end-to-end', () => {
         ['impact', '--uid', context.symbol.uid, '--direction', 'upstream', '--repo', 'mini-repo'],
         MINI_REPO,
       );
-      if (impactResult.status === null) return;
-
       expect(impactResult.status).toBe(0);
       const impact = JSON.parse(impactResult.stdout.trim());
       expect(impact.target.id).toBe(context.symbol.uid);
