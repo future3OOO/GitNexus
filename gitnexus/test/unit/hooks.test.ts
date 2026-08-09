@@ -21,11 +21,12 @@ import { spawnSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { runHook, parseHookOutput } from '../utils/hook-test-helpers.js';
+import { runHook, runHookWithEnv, parseHookOutput } from '../utils/hook-test-helpers.js';
 
 // ─── Paths to both hook variants ────────────────────────────────────
 
 const CJS_HOOK = path.resolve(__dirname, '..', '..', 'hooks', 'claude', 'gitnexus-hook.cjs');
+const CODEX_HOOK = path.resolve(__dirname, '..', '..', 'hooks', 'codex', 'gitnexus-hook.cjs');
 const PLUGIN_HOOK = path.resolve(
   __dirname,
   '..',
@@ -40,6 +41,21 @@ const PLUGIN_HOOK = path.resolve(
 
 let tmpDir: string;
 let gitNexusDir: string;
+let fakeCliPath: string;
+let augmentLockDir: string;
+let augmentLockOwnerPath: string;
+
+function findDeadPid(start = 999999): number {
+  for (let pid = start; pid < start + 10000; pid++) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err ? err.code : undefined;
+      if (code === 'ESRCH') return pid;
+    }
+  }
+  throw new Error('Could not find an unused pid for abandoned-lock test');
+}
 
 beforeAll(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gitnexus-hook-test-'));
@@ -53,6 +69,21 @@ beforeAll(() => {
   fs.writeFileSync(path.join(tmpDir, 'dummy.txt'), 'hello');
   spawnSync('git', ['add', '.'], { cwd: tmpDir, stdio: 'pipe' });
   spawnSync('git', ['commit', '-m', 'init'], { cwd: tmpDir, stdio: 'pipe' });
+  augmentLockDir = path.join(gitNexusDir, 'codex-augment.lock');
+  augmentLockOwnerPath = path.join(augmentLockDir, 'owner.json');
+
+  fakeCliPath = path.join(tmpDir, 'fake-gitnexus-cli.cjs');
+  fs.writeFileSync(
+    fakeCliPath,
+    [
+      '#!/usr/bin/env node',
+      "if (process.argv[2] === 'augment') {",
+      "  process.stderr.write('FAKE_AUGMENT_OUTPUT');",
+      '}',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
 });
 
 afterAll(() => {
@@ -75,6 +106,10 @@ function getHeadCommit(): string {
 describe('Hook files exist', () => {
   it('CJS hook exists', () => {
     expect(fs.existsSync(CJS_HOOK)).toBe(true);
+  });
+
+  it('Codex hook exists', () => {
+    expect(fs.existsSync(CODEX_HOOK)).toBe(true);
   });
 
   it('Plugin hook exists', () => {
@@ -182,6 +217,40 @@ describe('Dispatch map pattern', () => {
       expect(source).not.toMatch(/if\s*\(hookEvent\s*===\s*'PreToolUse'\)/);
     });
   }
+});
+
+describe('Codex hook isolation', () => {
+  it('Claude hook remains Claude-only and does not parse Codex tool_response payloads', () => {
+    const source = fs.readFileSync(CJS_HOOK, 'utf-8');
+    expect(source).toContain('GitNexus Claude Code Hook');
+    expect(source).not.toContain('tool_response');
+  });
+
+  it('Codex hook is PostToolUse-only and parses tool_response payloads', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    expect(source).toContain('GitNexus Codex Hook');
+    expect(source).toContain('tool_response');
+    expect(source).toContain('const handlers = {');
+    expect(source).toContain('PostToolUse: handlePostToolUse');
+    expect(source).not.toContain('PreToolUse: handlePreToolUse');
+  });
+
+  it('Codex hook has no shell: true in spawnSync calls', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    const lines = source.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim().startsWith('//') || line.trim().startsWith('*')) continue;
+      if (/shell:\s*(true|isWin)/.test(line)) {
+        throw new Error(`Codex hook line ${i + 1} has shell injection risk: ${line.trim()}`);
+      }
+    }
+  });
+
+  it('Codex hook uses .cmd extension for Windows npx', () => {
+    const source = fs.readFileSync(CODEX_HOOK, 'utf-8');
+    expect(source).toContain('npx.cmd');
+  });
 });
 
 // ─── Source code regression: debug error truncation ──────────────────
@@ -437,6 +506,200 @@ describe('PostToolUse staleness detection (integration)', () => {
       expect(output).not.toBeNull();
     });
   }
+});
+
+describe('PostToolUse Codex payload support (integration)', () => {
+  it('Codex hook parses Codex tool_response JSON strings', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: JSON.stringify({ exitCode: 0 }),
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.hookEventName).toBe('PostToolUse');
+    expect(output!.additionalContext).toContain('stale');
+  });
+
+  it('Codex hook ignores failed Codex tool_response payloads', () => {
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "fail"' },
+      tool_response: JSON.stringify({ exitCode: 1 }),
+      cwd: tmpDir,
+    });
+
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook ignores unrecognised Codex tool_response objects', () => {
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "fail"' },
+      tool_response: JSON.stringify({ status: 'failed' }),
+      cwd: tmpDir,
+    });
+
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook accepts object-shaped tool responses with exit_code', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: { exit_code: 0 },
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.additionalContext).toContain('stale');
+  });
+
+  it('Codex hook still emits stale warnings for mixed search + git commands', () => {
+    fs.writeFileSync(
+      path.join(gitNexusDir, 'meta.json'),
+      JSON.stringify({ lastCommit: 'aaaaaaa0000000000000000000000000deadbeef', stats: {} }),
+    );
+
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'rg dummy && git commit -m "test"' },
+      tool_response: JSON.stringify({ exitCode: 0 }),
+      cwd: tmpDir,
+    });
+
+    const output = parseHookOutput(result.stdout);
+    expect(output).not.toBeNull();
+    expect(output!.additionalContext).toContain('stale');
+  });
+});
+
+describe('Codex search augmentation safety', () => {
+  it('Codex hook augments plain literal rg patterns', () => {
+    const result = runHookWithEnv(
+      CODEX_HOOK,
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: 'rg landlord src' },
+        tool_response: JSON.stringify({ exitCode: 0 }),
+        cwd: tmpDir,
+      },
+      { GITNEXUS_CLI_PATH: fakeCliPath },
+    );
+
+    const output = parseHookOutput(result.stdout);
+    expect(result.status).toBe(0);
+    expect(output).not.toBeNull();
+    expect(output!.hookEventName).toBe('PostToolUse');
+    expect(output!.additionalContext).toContain('FAKE_AUGMENT_OUTPUT');
+  });
+
+  it('Codex hook skips regex-heavy rg patterns that would drive wildcard FTS', () => {
+    const result = runHookWithEnv(
+      CODEX_HOOK,
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Bash',
+        tool_input: { command: "rg 'run_tapi_action|/api/.*/actions' src" },
+        tool_response: JSON.stringify({ exitCode: 0 }),
+        cwd: tmpDir,
+      },
+      { GITNEXUS_CLI_PATH: fakeCliPath },
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('');
+  });
+
+  it('Codex hook skips augmentation while the recorded lock owner is still alive', () => {
+    fs.mkdirSync(augmentLockDir, { recursive: true });
+    fs.writeFileSync(
+      augmentLockOwnerPath,
+      JSON.stringify({ pid: process.pid, createdAt: Date.now() }),
+      'utf-8',
+    );
+
+    try {
+      const result = runHookWithEnv(
+        CODEX_HOOK,
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'rg landlord src' },
+          tool_response: JSON.stringify({ exitCode: 0 }),
+          cwd: tmpDir,
+        },
+        { GITNEXUS_CLI_PATH: fakeCliPath },
+      );
+
+      expect(result.status).toBe(0);
+      expect(result.stdout.trim()).toBe('');
+    } finally {
+      fs.rmSync(augmentLockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('Codex hook clears abandoned augment locks owned by dead processes', () => {
+    fs.mkdirSync(augmentLockDir, { recursive: true });
+    fs.writeFileSync(
+      augmentLockOwnerPath,
+      JSON.stringify({ pid: findDeadPid(), createdAt: Date.now() - 30000 }),
+      'utf-8',
+    );
+
+    try {
+      const result = runHookWithEnv(
+        CODEX_HOOK,
+        {
+          hook_event_name: 'PostToolUse',
+          tool_name: 'Bash',
+          tool_input: { command: 'rg landlord src' },
+          tool_response: JSON.stringify({ exitCode: 0 }),
+          cwd: tmpDir,
+        },
+        { GITNEXUS_CLI_PATH: fakeCliPath },
+      );
+
+      const output = parseHookOutput(result.stdout);
+      expect(result.status).toBe(0);
+      expect(output).not.toBeNull();
+      expect(output!.additionalContext).toContain('FAKE_AUGMENT_OUTPUT');
+    } finally {
+      fs.rmSync(augmentLockDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Codex cwd validation (integration)', () => {
+  it('Codex hook is silent when cwd is relative', () => {
+    const result = runHook(CODEX_HOOK, {
+      hook_event_name: 'PostToolUse',
+      tool_name: 'Bash',
+      tool_input: { command: 'git commit -m "test"' },
+      tool_response: JSON.stringify({ exitCode: 0 }),
+      cwd: 'relative/path',
+    });
+    expect(result.stdout.trim()).toBe('');
+  });
 });
 
 // ─── Integration: cwd validation rejects relative paths ─────────────

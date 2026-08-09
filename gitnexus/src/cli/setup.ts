@@ -25,6 +25,23 @@ interface SetupResult {
   errors: string[];
 }
 
+const GITNEXUS_START_MARKER = '<!-- gitnexus:start -->';
+const GITNEXUS_END_MARKER = '<!-- gitnexus:end -->';
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasTomlSection(content: string, sectionName: string): boolean {
+  return content
+    .split(/\r?\n/)
+    .some((line) =>
+      new RegExp(
+        `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*(?:[#;].*)?)?$`,
+      ).test(line),
+    );
+}
+
 /**
  * Resolve the absolute path to the `gitnexus` binary if it's installed
  * globally (or via npm -g / yarn global). Returns null when not found.
@@ -110,6 +127,158 @@ async function writeJsonFile(filePath: string, data: any): Promise<void> {
   await fs.writeFile(filePath, JSON.stringify(data, null, 2) + '\n', 'utf-8');
 }
 
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function upsertMarkedSection(
+  filePath: string,
+  content: string,
+): Promise<'created' | 'updated' | 'appended'> {
+  if (!(await fileExists(filePath))) {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, `${content.trimEnd()}\n`, 'utf-8');
+    return 'created';
+  }
+
+  const existingContent = await fs.readFile(filePath, 'utf-8');
+  const startIdx = existingContent.indexOf(GITNEXUS_START_MARKER);
+  const endIdx = existingContent.indexOf(GITNEXUS_END_MARKER);
+
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    const before = existingContent.substring(0, startIdx);
+    const after = existingContent.substring(endIdx + GITNEXUS_END_MARKER.length);
+    const nextContent = `${before}${content}${after}`.trimEnd() + '\n';
+    await fs.writeFile(filePath, nextContent, 'utf-8');
+    return 'updated';
+  }
+
+  const nextContent = `${existingContent.trimEnd()}\n\n${content.trimEnd()}\n`;
+  await fs.writeFile(filePath, nextContent, 'utf-8');
+  return 'appended';
+}
+
+function generateCodexAgentsContent(): string {
+  return `${GITNEXUS_START_MARKER}
+# GitNexus — Global Workflow
+
+When you are inside an indexed repository, use GitNexus to understand structure, blast radius, and execution flow before making changes.
+
+## Search Flow
+
+- Prefer fast search first:
+  - Use \`fff\` MCP tools when available for raw file/content search
+  - Otherwise use Bash \`rg\`, \`grep\`, or \`find\`
+- After locating the symbol or file, switch to GitNexus for meaning and safety:
+  - \`gitnexus_query({query: "concept"})\` for architecture and execution flows
+  - \`gitnexus_context({name: "symbol"})\` for callers/callees and process participation
+  - \`gitnexus_impact({target: "symbol", direction: "upstream"})\` before editing
+
+## Hooks
+
+- A global Codex Bash hook is installed in \`~/.codex/hooks.json\`
+- Bash search commands can be enriched with GitNexus context automatically
+- Bash git mutations can warn when the GitNexus index is stale
+- Native MCP tools like \`fff\` are not hooked directly, so use the search flow above
+
+## Skills
+
+| Task | Read this skill file |
+|------|----------------------|
+| Understand architecture / "How does X work?" | \`~/.agents/skills/gitnexus-exploring/SKILL.md\` |
+| Blast radius / "What breaks if I change X?" | \`~/.agents/skills/gitnexus-impact-analysis/SKILL.md\` |
+| Trace bugs / "Why is X failing?" | \`~/.agents/skills/gitnexus-debugging/SKILL.md\` |
+| Rename / extract / split / refactor | \`~/.agents/skills/gitnexus-refactoring/SKILL.md\` |
+| Tools, resources, schema reference | \`~/.agents/skills/gitnexus-guide/SKILL.md\` |
+| Index, status, clean, wiki CLI commands | \`~/.agents/skills/gitnexus-cli/SKILL.md\` |
+| Review pull requests | \`~/.agents/skills/gitnexus-pr-review/SKILL.md\` |
+
+## Rules
+
+- Always run impact analysis before editing a symbol in an indexed repo
+- Run \`gitnexus_detect_changes()\` before committing when GitNexus MCP is available
+- Reindex after structural changes or git mutations when warned by the hook
+
+${GITNEXUS_END_MARKER}`;
+}
+
+/**
+ * Copy the bundled GitNexus hook script into a per-agent hooks directory.
+ * Returns the absolute destination path.
+ */
+async function installBundledHookScript(
+  destHooksDir: string,
+  hookVariant: 'claude' | 'codex',
+): Promise<string> {
+  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', hookVariant);
+  const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
+  const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
+
+  await fs.mkdir(destHooksDir, { recursive: true });
+
+  let content = await fs.readFile(src, 'utf-8');
+  // Inject resolved CLI path so the copied hook can find the CLI
+  // even when it's no longer inside the npm package tree.
+  const resolvedCli = path.join(__dirname, '..', 'cli', 'index.js');
+  const normalizedCli = path.resolve(resolvedCli).replace(/\\/g, '/');
+  const jsonCli = JSON.stringify(normalizedCli);
+  content = content.replace(
+    "let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');",
+    `let cliPath = ${jsonCli};`,
+  );
+
+  await fs.writeFile(dest, content, 'utf-8');
+  return dest;
+}
+
+interface HookEntry {
+  matcher?: string;
+  hooks?: Array<{ command?: string }> | unknown;
+}
+
+function isManagedHookCommand(command: unknown): boolean {
+  return typeof command === 'string' && command.replace(/\\/g, '/').includes('gitnexus-hook.cjs');
+}
+
+function ensureCommandHookEntry(
+  existing: any,
+  eventName: string,
+  matcher: string | undefined,
+  hookCmd: string,
+  timeout: number,
+  statusMessage: string,
+) {
+  if (!existing.hooks || typeof existing.hooks !== 'object') existing.hooks = {};
+  if (!Array.isArray(existing.hooks[eventName])) existing.hooks[eventName] = [];
+
+  const existingEntry = existing.hooks[eventName].find((entry: HookEntry | null) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const matcherMatches = matcher ? entry.matcher === matcher : !entry.matcher;
+    const hooks = Array.isArray(entry.hooks) ? entry.hooks : [];
+    return matcherMatches && hooks.some((hook) => hook?.command === hookCmd || isManagedHookCommand(hook?.command));
+  });
+
+  if (existingEntry) {
+    const hooks = Array.isArray(existingEntry.hooks) ? existingEntry.hooks : [];
+    existingEntry.hooks = [
+      ...hooks.filter((hook) => !isManagedHookCommand(hook?.command)),
+      { type: 'command', command: hookCmd, timeout, statusMessage },
+    ];
+    return;
+  }
+
+  const nextEntry: { matcher?: string; hooks: Array<Record<string, any>> } = {
+    hooks: [{ type: 'command', command: hookCmd, timeout, statusMessage }],
+  };
+  if (matcher) nextEntry.matcher = matcher;
+  existing.hooks[eventName].push(nextEntry);
+}
+
 /**
  * Check if a directory exists
  */
@@ -189,67 +358,34 @@ async function installClaudeCodeHooks(result: SetupResult): Promise<void> {
 
   const settingsPath = path.join(claudeDir, 'settings.json');
 
-  // Source hooks bundled within the gitnexus package (hooks/claude/)
-  const pluginHooksPath = path.join(__dirname, '..', '..', 'hooks', 'claude');
-
   // Copy unified hook script to ~/.claude/hooks/gitnexus/
   const destHooksDir = path.join(claudeDir, 'hooks', 'gitnexus');
 
   try {
-    await fs.mkdir(destHooksDir, { recursive: true });
-
-    const src = path.join(pluginHooksPath, 'gitnexus-hook.cjs');
-    const dest = path.join(destHooksDir, 'gitnexus-hook.cjs');
-    try {
-      let content = await fs.readFile(src, 'utf-8');
-      // Inject resolved CLI path so the copied hook can find the CLI
-      // even when it's no longer inside the npm package tree
-      const resolvedCli = path.join(__dirname, '..', 'cli', 'index.js');
-      const normalizedCli = path.resolve(resolvedCli).replace(/\\/g, '/');
-      const jsonCli = JSON.stringify(normalizedCli);
-      content = content.replace(
-        "let cliPath = path.resolve(__dirname, '..', '..', 'dist', 'cli', 'index.js');",
-        `let cliPath = ${jsonCli};`,
-      );
-      await fs.writeFile(dest, content, 'utf-8');
-    } catch {
-      // Script not found in source — skip
-    }
-
-    const hookPath = path.join(destHooksDir, 'gitnexus-hook.cjs').replace(/\\/g, '/');
+    const hookPath = (await installBundledHookScript(destHooksDir, 'claude')).replace(/\\/g, '/');
     const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
 
     // Merge hook config into ~/.claude/settings.json
     const existing = (await readJsonFile(settingsPath)) || {};
-    if (!existing.hooks) existing.hooks = {};
-
     // NOTE: SessionStart hooks are broken on Windows (Claude Code bug #23576).
     // Session context is delivered via CLAUDE.md / skills instead.
 
-    // Helper: add a hook entry if one with 'gitnexus-hook' isn't already registered
-    interface HookEntry {
-      hooks?: Array<{ command?: string }>;
-    }
-    function ensureHookEntry(
-      eventName: string,
-      matcher: string,
-      timeout: number,
-      statusMessage: string,
-    ) {
-      if (!existing.hooks[eventName]) existing.hooks[eventName] = [];
-      const hasHook = existing.hooks[eventName].some((h: HookEntry) =>
-        h.hooks?.some((hh) => hh.command?.includes('gitnexus-hook')),
-      );
-      if (!hasHook) {
-        existing.hooks[eventName].push({
-          matcher,
-          hooks: [{ type: 'command', command: hookCmd, timeout, statusMessage }],
-        });
-      }
-    }
-
-    ensureHookEntry('PreToolUse', 'Grep|Glob|Bash', 10, 'Enriching with GitNexus graph context...');
-    ensureHookEntry('PostToolUse', 'Bash', 10, 'Checking GitNexus index freshness...');
+    ensureCommandHookEntry(
+      existing,
+      'PreToolUse',
+      'Grep|Glob|Bash',
+      hookCmd,
+      10,
+      'Enriching with GitNexus graph context...',
+    );
+    ensureCommandHookEntry(
+      existing,
+      'PostToolUse',
+      'Bash',
+      hookCmd,
+      10,
+      'Checking GitNexus index freshness...',
+    );
 
     await writeJsonFile(settingsPath, existing);
     result.configured.push('Claude Code hooks (PreToolUse, PostToolUse)');
@@ -288,6 +424,43 @@ function getCodexMcpTomlSection(): string {
   return `[mcp_servers.gitnexus]\ncommand = ${command}\nargs = ${args}\n`;
 }
 
+function upsertTomlKey(content: string, sectionName: string, key: string, value: string): string {
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  const line = `${key} = ${value}`;
+  const sectionHeaderRegex = new RegExp(
+    `^\\s*\\[${escapeRegExp(sectionName)}\\](?:\\s*(?:[#;].*)?)?$`,
+  );
+  const anySectionRegex = /^\s*\[[^\]]+\]/;
+  const keyLineRegex = new RegExp(`^(\\s*)${escapeRegExp(key)}\\s*=.*$`);
+
+  if (!content.trim()) {
+    return `[${sectionName}]${eol}${line}${eol}`;
+  }
+
+  const lines = content.trimEnd().split(/\r?\n/);
+  const sectionStart = lines.findIndex((entry) => sectionHeaderRegex.test(entry));
+  if (sectionStart === -1) {
+    return `${content.trimEnd()}${eol}${eol}[${sectionName}]${eol}${line}${eol}`;
+  }
+
+  let insertAt = lines.length;
+  for (let idx = sectionStart + 1; idx < lines.length; idx += 1) {
+    if (anySectionRegex.test(lines[idx])) {
+      insertAt = idx;
+      break;
+    }
+    const keyMatch = lines[idx].match(keyLineRegex);
+    if (keyMatch) {
+      const indent = keyMatch[1] ?? '';
+      lines[idx] = `${indent}${line}`;
+      return `${lines.join(eol)}${eol}`;
+    }
+  }
+
+  lines.splice(insertAt, 0, line);
+  return `${lines.join(eol)}${eol}`;
+}
+
 /**
  * Append GitNexus MCP server config to Codex's config.toml if missing.
  */
@@ -299,12 +472,13 @@ async function upsertCodexConfigToml(configPath: string): Promise<void> {
     existing = '';
   }
 
-  if (existing.includes('[mcp_servers.gitnexus]')) {
-    return;
+  let nextContent = existing;
+  if (!hasTomlSection(nextContent, 'mcp_servers.gitnexus')) {
+    const section = getCodexMcpTomlSection();
+    nextContent =
+      nextContent.trim().length > 0 ? `${nextContent.trimEnd()}\n\n${section}` : section;
   }
-
-  const section = getCodexMcpTomlSection();
-  const nextContent = existing.trim().length > 0 ? `${existing.trimEnd()}\n\n${section}` : section;
+  nextContent = upsertTomlKey(nextContent, 'features', 'codex_hooks', 'true');
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, `${nextContent.trimEnd()}\n`, 'utf-8');
@@ -317,23 +491,68 @@ async function setupCodex(result: SetupResult): Promise<void> {
     return;
   }
 
+  const configPath = path.join(codexDir, 'config.toml');
+  let usedCli = false;
+
   try {
     const entry = getMcpEntry();
     await execFileAsync('codex', ['mcp', 'add', 'gitnexus', '--', entry.command, ...entry.args], {
       shell: process.platform === 'win32',
     });
-    result.configured.push('Codex');
-    return;
+    usedCli = true;
   } catch {
     // Fallback for environments where `codex` binary isn't on PATH.
   }
 
   try {
-    const configPath = path.join(codexDir, 'config.toml');
     await upsertCodexConfigToml(configPath);
-    result.configured.push('Codex (MCP added to ~/.codex/config.toml)');
+    result.configured.push(
+      usedCli ? 'Codex' : 'Codex (MCP added to ~/.codex/config.toml)',
+    );
   } catch (err: any) {
     result.errors.push(`Codex: ${err.message}`);
+  }
+}
+
+async function installCodexHooks(result: SetupResult): Promise<void> {
+  const codexDir = path.join(os.homedir(), '.codex');
+  if (!(await dirExists(codexDir))) return;
+
+  const hooksPath = path.join(codexDir, 'hooks.json');
+  const destHooksDir = path.join(codexDir, 'hooks', 'gitnexus');
+
+  try {
+    const hookPath = (await installBundledHookScript(destHooksDir, 'codex')).replace(/\\/g, '/');
+    const hookCmd = `node "${hookPath.replace(/"/g, '\\"')}"`;
+    const existing = (await readJsonFile(hooksPath)) || {};
+
+    ensureCommandHookEntry(
+      existing,
+      'PostToolUse',
+      'Bash',
+      hookCmd,
+      20,
+      'Reviewing Bash output with GitNexus...',
+    );
+
+    await writeJsonFile(hooksPath, existing);
+    result.configured.push('Codex hooks (PostToolUse Bash)');
+  } catch (err: any) {
+    result.errors.push(`Codex hooks: ${err.message}`);
+  }
+}
+
+async function installCodexAgentsFile(result: SetupResult): Promise<void> {
+  const codexDir = path.join(os.homedir(), '.codex');
+  if (!(await dirExists(codexDir))) return;
+
+  const agentsPath = path.join(codexDir, 'AGENTS.md');
+
+  try {
+    const action = await upsertMarkedSection(agentsPath, generateCodexAgentsContent());
+    result.configured.push(`Codex AGENTS.md (${action} → ~/.codex/AGENTS.md)`);
+  } catch (err: any) {
+    result.errors.push(`Codex AGENTS.md: ${err.message}`);
   }
 }
 
@@ -501,6 +720,8 @@ export const setupCommand = async () => {
   await installCursorSkills(result);
   await installOpenCodeSkills(result);
   await installCodexSkills(result);
+  await installCodexHooks(result);
+  await installCodexAgentsFile(result);
 
   // Print results
   if (result.configured.length > 0) {

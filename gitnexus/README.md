@@ -32,13 +32,13 @@ To configure MCP for your editor, run `npx gitnexus setup` once — or set it up
 
 | Editor | MCP | Skills | Hooks (auto-augment) | Support |
 |--------|-----|--------|---------------------|---------|
-| **Claude Code** | Yes | Yes | Yes (PreToolUse) | **Full** |
+| **Claude Code** | Yes | Yes | Yes (PreToolUse + PostToolUse) | **Full** |
 | **Cursor** | Yes | Yes | — | MCP + Skills |
-| **Codex** | Yes | Yes | — | MCP + Skills |
+| **Codex** | Yes | Yes | Yes (PostToolUse on Bash) | MCP + Skills + Hooks |
 | **Windsurf** | Yes | — | — | MCP |
 | **OpenCode** | Yes | Yes | — | MCP + Skills |
 
-> **Claude Code** gets the deepest integration: MCP tools + agent skills + PreToolUse hooks that automatically enrich grep/glob/bash calls with knowledge graph context.
+> **Claude Code** still has the deepest hook surface today because it can enrich native `Grep` / `Glob` / `Bash` searches pre-tool. **Codex** now gets global hooks too, but current Codex runtime only emits `PreToolUse` / `PostToolUse` for `Bash`.
 
 ### Community Integrations
 
@@ -60,11 +60,30 @@ claude mcp add gitnexus -- npx -y gitnexus@latest mcp
 claude mcp add gitnexus -- cmd /c npx -y gitnexus@latest mcp
 ```
 
-### Codex (full support — MCP + skills)
+### Codex (manual MCP command)
 
 ```bash
 codex mcp add gitnexus -- npx -y gitnexus@latest mcp
 ```
+
+For Codex on WSL, prefer `gitnexus setup` or a global `gitnexus` binary over
+manual `npx` wiring. `gitnexus setup` writes the faster binary-first MCP
+command when one is available, which avoids the slow cold `npx` path that can
+destabilize startup under WSL.
+
+Unlike the manual command above, `gitnexus setup` also enables
+`features.codex_hooks = true`, installs a global
+`~/.codex/hooks.json`, and copies a dedicated Codex GitNexus hook into
+`~/.codex/hooks/gitnexus/`. It also installs a GitNexus section into the global
+`~/.codex/AGENTS.md` so Codex has persistent workflow guidance and skill
+references. Current Codex hooks only enrich literal-ish Bash search patterns
+(for example simple `rg` / `grep` tokens). Regex-heavy or wildcard search
+patterns are skipped intentionally, and overlapping Bash events may also skip
+augmentation while another GitNexus augment run is already in flight. Stale
+index warnings are emitted for successful `git commit`, `git merge`,
+`git rebase`, `git cherry-pick`, and `git pull` commands. Hooks can also stay
+silent when Codex does not provide a parseable Bash result payload, the working
+directory is not an absolute path, or the current repo is not indexed.
 
 ### Cursor / Windsurf
 

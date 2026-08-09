@@ -1,11 +1,3 @@
-/**
- * Local Backend (Multi-Repo)
- *
- * Provides tool implementations using local .gitnexus/ indexes.
- * Supports multiple indexed repositories via a global registry.
- * LadybugDB connections are opened lazily per repo on first query.
- */
-
 import fs from 'fs/promises';
 import path from 'path';
 import {
@@ -19,16 +11,14 @@ import {
 export { isWriteQuery };
 // Embedding imports are lazy (dynamic import) to avoid loading onnxruntime-node
 // at MCP server startup — crashes on unsupported Node ABI versions (#89)
-// git utilities available if needed
-// import { isGitRepo, getCurrentCommit, getGitRoot } from '../../storage/git.js';
 import {
   listRegisteredRepos,
   cleanupOldKuzuFiles,
   type RegistryEntry,
 } from '../../storage/repo-manager.js';
+import { isGitRepo } from '../../storage/git.js';
+import { checkStaleness } from '../../core/git-staleness.js';
 import { GroupService, type GroupToolPort } from '../../core/group/service.js';
-// AI context generation is CLI-only (gitnexus analyze)
-// import { generateAIContextFiles } from '../../cli/ai-context.js';
 
 /**
  * Quick test-file detection for filtering impact results.
@@ -180,6 +170,7 @@ export class LocalBackend {
   private initializedRepos: Set<string> = new Set();
   private reinitPromises: Map<string, Promise<void>> = new Map();
   private lastStalenessCheck: Map<string, number> = new Map();
+  private lastGitStalenessCheck: Map<string, number> = new Map();
   private groupToolSvc: GroupService | null = null;
 
   /**
@@ -271,14 +262,11 @@ export class LocalBackend {
         this.repos.delete(id);
         this.contextCache.delete(id);
         this.initializedRepos.delete(id);
+        this.lastGitStalenessCheck.delete(id);
       }
     }
   }
 
-  /**
-   * Generate a stable repo ID from name + path.
-   * If names collide, append a hash of the path.
-   */
   private repoId(name: string, repoPath: string): string {
     const base = name.toLowerCase();
     // Check for name collision with a different path
@@ -359,21 +347,34 @@ export class LocalBackend {
     return null; // Multiple repos, no param — ambiguous
   }
 
-  // ─── Lazy LadybugDB Init ────────────────────────────────────────────
-
   private async ensureInitialized(repoId: string): Promise<void> {
-    // If a reinit is already in progress for this repo, wait for it
     const pending = this.reinitPromises.get(repoId);
     if (pending) return pending;
-
-    const handle = this.repos.get(repoId);
+    let handle = this.repos.get(repoId);
     if (!handle) throw new Error(`Unknown repo: ${repoId}`);
-
-    // Check if the index was rebuilt since we opened the connection (#297).
-    // Throttle staleness checks to at most once per 5 seconds per repo to
-    // avoid an fs.readFile round-trip on every tool invocation.
-    if (this.initializedRepos.has(repoId) && isLbugReady(repoId)) {
-      const now = Date.now();
+    const initializedAndReady = this.initializedRepos.has(repoId) && isLbugReady(repoId);
+    const now = Date.now();
+    const shouldCheckGitStaleness =
+      !initializedAndReady || now - (this.lastGitStalenessCheck.get(repoId) ?? 0) >= 5000;
+    if (shouldCheckGitStaleness) {
+      if (isGitRepo(handle.repoPath)) {
+        let staleness = checkStaleness(handle.repoPath, handle.lastCommit, { strict: true });
+        if (staleness.isStale) {
+          await this.refreshRepos();
+          handle = this.repos.get(repoId) ?? handle;
+          staleness = checkStaleness(handle.repoPath, handle.lastCommit, { strict: true });
+          if (staleness.isStale) {
+            const indexed = staleness.indexedCommit || handle.lastCommit || 'unknown';
+            const current = staleness.currentCommit || 'unknown';
+            throw new Error(
+              `GitNexus index is stale for ${handle.name}. Indexed: ${indexed.slice(0, 7)}. Current HEAD: ${current.slice(0, 7)}. Run: gitnexus analyze`,
+            );
+          }
+        }
+      }
+      this.lastGitStalenessCheck.set(repoId, now);
+    }
+    if (initializedAndReady) {
       const lastCheck = this.lastStalenessCheck.get(repoId) ?? 0;
       if (now - lastCheck < 5000) return; // Checked recently — skip
 
@@ -383,9 +384,6 @@ export class LocalBackend {
         const metaRaw = await fs.readFile(metaPath, 'utf-8');
         const meta = JSON.parse(metaRaw);
         if (meta.indexedAt && meta.indexedAt !== handle.indexedAt) {
-          // Index was rebuilt — close stale connection and re-init.
-          // Wrap in reinitPromises to prevent TOCTOU race where concurrent
-          // callers both detect staleness and double-close the pool.
           const reinit = (async () => {
             try {
               await closeLbug(repoId);
@@ -411,7 +409,6 @@ export class LocalBackend {
       await initLbug(repoId, handle.lbugPath);
       this.initializedRepos.add(repoId);
     } catch (err: any) {
-      // If lock error, mark as not initialized so next call retries
       this.initializedRepos.delete(repoId);
       throw err;
     }
@@ -793,45 +790,43 @@ export class LocalBackend {
 
     const results: any[] = [];
 
+    // BM25 ranks whole files, so arbitrary nodes can be returned in place of the
+    // symbol the caller named. Single identifiers only; multi-term is unchanged.
+    const wanted = /^[A-Za-z0-9_]+$/.test(query.trim()) ? query.trim() : '';
     for (const bm25Result of bm25Results) {
       const fullPath = bm25Result.filePath;
+      let symbols: Record<string, unknown>[] = [];
       try {
-        const symbols = await executeParameterized(
+        symbols = await executeParameterized(
           repo.id,
           `
           MATCH (n)
           WHERE n.filePath = $filePath
           RETURN n.id AS id, n.name AS name, labels(n)[0] AS type, n.filePath AS filePath, n.startLine AS startLine, n.endLine AS endLine
+          ${wanted ? 'ORDER BY CASE WHEN n.name = $name THEN 0 ELSE 1 END' : ''}
           LIMIT 3
         `,
-          { filePath: fullPath },
+          wanted ? { filePath: fullPath, name: wanted } : { filePath: fullPath },
         );
+      } catch {
+        symbols = [];
+      }
 
-        if (symbols.length > 0) {
-          for (const sym of symbols) {
-            results.push({
-              nodeId: sym.id || sym[0],
-              name: sym.name || sym[1],
-              type: sym.type || sym[2],
-              filePath: sym.filePath || sym[3],
-              startLine: sym.startLine || sym[4],
-              endLine: sym.endLine || sym[5],
-              bm25Score: bm25Result.score,
-            });
-          }
-        } else {
-          const fileName = fullPath.split('/').pop() || fullPath;
+      if (symbols.length > 0) {
+        for (const sym of symbols) {
           results.push({
-            name: fileName,
-            type: 'File',
-            filePath: bm25Result.filePath,
+            nodeId: sym.id || sym[0],
+            name: sym.name || sym[1],
+            type: sym.type || sym[2],
+            filePath: sym.filePath || sym[3],
+            startLine: sym.startLine || sym[4],
+            endLine: sym.endLine || sym[5],
             bm25Score: bm25Result.score,
           });
         }
-      } catch {
-        const fileName = fullPath.split('/').pop() || fullPath;
+      } else {
         results.push({
-          name: fileName,
+          name: fullPath.split('/').pop() || fullPath,
           type: 'File',
           filePath: bm25Result.filePath,
           bm25Score: bm25Result.score,
@@ -1908,7 +1903,7 @@ export class LocalBackend {
     try {
       return await this._impactImpl(repo, params);
     } catch (err: any) {
-      // Return structured error instead of crashing (#321)
+      if (err instanceof Error && err.message.startsWith('GitNexus index is stale')) throw err;
       return {
         error: (err instanceof Error ? err.message : String(err)) || 'Impact analysis failed',
         target: { name: params.target },
@@ -3204,5 +3199,6 @@ export class LocalBackend {
     this.repos.clear();
     this.contextCache.clear();
     this.initializedRepos.clear();
+    this.lastGitStalenessCheck.clear();
   }
 }

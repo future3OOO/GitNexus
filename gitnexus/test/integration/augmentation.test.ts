@@ -92,9 +92,14 @@ withTestLbugDB(
         expect(result).toBe('');
       });
 
+      it('returns empty string for regex-heavy wildcard patterns', async () => {
+        const result = await augment('run_tapi_action|/api/.*/actions', handle.dbPath);
+        expect(result).toBe('');
+      });
+
       it('handles special regex characters in pattern without throwing', async () => {
         const result = await augment('func()', handle.dbPath);
-        expect(typeof result).toBe('string');
+        expect(result).toBe('');
       });
 
       it('handles very long pattern without throwing', async () => {
