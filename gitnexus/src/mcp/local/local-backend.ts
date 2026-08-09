@@ -473,8 +473,30 @@ export class LocalBackend {
       }
       case 'context':
         return this.context(repo, params);
-      case 'impact':
+      case 'impact': {
+        if (params?.uid) {
+          const result = await this.impactByUid(repo.id, params.uid, params.direction, {
+            maxDepth: params.maxDepth || 3,
+            relationTypes: params.relationTypes || [],
+            minConfidence: params.minConfidence ?? 0,
+            includeTests: params.includeTests ?? false,
+          });
+          return (
+            result || {
+              error: 'UID impact analysis failed',
+              target: { id: params.uid },
+              direction: params.direction,
+              impactedCount: 0,
+              risk: 'UNKNOWN',
+              suggestion: 'Resolve the symbol again with gitnexus context --uid <uid>',
+            }
+          );
+        }
+        if (!params?.target) {
+          return { error: 'Impact target or UID is required' };
+        }
         return this.impact(repo, params);
+      }
       case 'detect_changes':
         return this.detectChanges(repo, params);
       case 'rename':
@@ -1944,72 +1966,61 @@ export class LocalBackend {
     const includeTests = params.includeTests ?? false;
     const minConfidence = params.minConfidence ?? 0;
 
-    // Resolve target by name, preferring Class/Interface over Constructor
-    // (fix #480: Java class and constructor share the same name).
-    // labels(n)[0] returns empty string in LadybugDB, so we use explicit
-    // label-typed sub-queries in a single UNION ordered by priority to avoid
-    // up to 6 serial round-trips for non-Class targets.
-    let sym: any = null;
-    let symType = '';
+    const resolved = await this._resolveImpactSymbol(repo.id, 'name', target);
+    if (!resolved) return { error: `Target '${target}' not found` };
 
-    try {
-      const rows = await executeParameterized(
-        repo.id,
-        `
-        MATCH (n:\`Class\`) WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 0 AS priority LIMIT 1
-        UNION ALL
-        MATCH (n:\`Interface\`) WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 1 AS priority LIMIT 1
-        UNION ALL
-        MATCH (n:\`Function\`) WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 2 AS priority LIMIT 1
-        UNION ALL
-        MATCH (n:\`Method\`) WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 3 AS priority LIMIT 1
-        UNION ALL
-        MATCH (n:\`Constructor\`) WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 4 AS priority LIMIT 1
-      `,
-        { targetName: target },
-      ).catch(() => []);
-
-      if (rows.length > 0) {
-        // Pick the row with the lowest priority value (Class wins over Constructor)
-        const best = rows.reduce((a: any, b: any) =>
-          (a.priority ?? a[3] ?? 99) <= (b.priority ?? b[3] ?? 99) ? a : b,
-        );
-        sym = best;
-        const priorityToLabel = ['Class', 'Interface', 'Function', 'Method', 'Constructor'];
-        symType = priorityToLabel[best.priority ?? best[3]] ?? '';
-      }
-    } catch {
-      /* fall through to unlabeled match */
-    }
-
-    // Fall back to unlabeled match for any other node type
-    if (!sym) {
-      const rows = await executeParameterized(
-        repo.id,
-        `
-        MATCH (n)
-        WHERE n.name = $targetName
-        RETURN n.id AS id, n.name AS name, n.filePath AS filePath
-        LIMIT 1
-      `,
-        { targetName: target },
-      );
-      if (rows.length > 0) sym = rows[0];
-    }
-
-    if (!sym) return { error: `Target '${target}' not found` };
-
-    return this._runImpactBFS(repo, sym, symType, direction, {
+    return this._runImpactBFS(repo, resolved.sym, resolved.symType, direction, {
       maxDepth,
       relationTypes,
       includeTests,
       minConfidence,
     });
+  }
+
+  /** Resolve an impact target with an explicit type because LadybugDB labels(n)[0] is empty. */
+  private async _resolveImpactSymbol(
+    repoId: string,
+    selector: 'name' | 'id',
+    value: string,
+  ): Promise<{ sym: any; symType: string } | null> {
+    const predicate = selector === 'id' ? 'n.id = $selector' : 'n.name = $selector';
+    const rows = await executeParameterized(
+      repoId,
+      `
+      MATCH (n:\`Class\`) WHERE ${predicate}
+      RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 0 AS priority LIMIT 1
+      UNION ALL
+      MATCH (n:\`Interface\`) WHERE ${predicate}
+      RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 1 AS priority LIMIT 1
+      UNION ALL
+      MATCH (n:\`Function\`) WHERE ${predicate}
+      RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 2 AS priority LIMIT 1
+      UNION ALL
+      MATCH (n:\`Method\`) WHERE ${predicate}
+      RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 3 AS priority LIMIT 1
+      UNION ALL
+      MATCH (n:\`Constructor\`) WHERE ${predicate}
+      RETURN n.id AS id, n.name AS name, n.filePath AS filePath, 4 AS priority LIMIT 1
+    `,
+      { selector: value },
+    ).catch(() => []);
+
+    if (rows.length > 0) {
+      const best = rows.reduce((a: any, b: any) =>
+        (a.priority ?? a[3] ?? 99) <= (b.priority ?? b[3] ?? 99) ? a : b,
+      );
+      const priorityToLabel = ['Class', 'Interface', 'Function', 'Method', 'Constructor'];
+      return { sym: best, symType: priorityToLabel[best.priority ?? best[3]] ?? '' };
+    }
+
+    const fallback = await executeParameterized(
+      repoId,
+      `MATCH (n) WHERE ${predicate}
+       RETURN n.id AS id, n.name AS name, n.filePath AS filePath
+       LIMIT 1`,
+      { selector: value },
+    );
+    return fallback.length > 0 ? { sym: fallback[0], symType: '' } : null;
   }
 
   /**
@@ -2464,24 +2475,13 @@ export class LocalBackend {
 
     const dir: 'upstream' | 'downstream' = direction === 'downstream' ? 'downstream' : 'upstream';
 
-    let rows: any[];
+    let resolved: { sym: any; symType: string } | null;
     try {
-      rows = await executeParameterized(
-        repoId,
-        `MATCH (n) WHERE n.id = $uid
-         RETURN n.id AS id, n.name AS name, n.filePath AS filePath, labels(n)[0] AS type
-         LIMIT 1`,
-        { uid },
-      );
+      resolved = await this._resolveImpactSymbol(repoId, 'id', uid);
     } catch {
       return null;
     }
-    if (!rows?.length) return null;
-
-    const sym = rows[0];
-    const labelRaw = sym.type ?? sym[3];
-    const symType =
-      typeof labelRaw === 'string' && labelRaw.trim().length > 0 ? labelRaw.trim() : '';
+    if (!resolved) return null;
 
     // Map legacy relation type names (backward compat for OVERRIDES → METHOD_OVERRIDES)
     const mappedRelTypes = opts.relationTypes?.flatMap((t: string) =>
@@ -2513,7 +2513,7 @@ export class LocalBackend {
           ];
 
     try {
-      return await this._runImpactBFS(repo, sym, symType, dir, {
+      return await this._runImpactBFS(repo, resolved.sym, resolved.symType, dir, {
         maxDepth: opts.maxDepth,
         relationTypes,
         includeTests: opts.includeTests,

@@ -34,13 +34,15 @@ describe('CLI help surface', () => {
     expect(result.stdout).toContain('--file <path>');
   });
 
-  it('impact help keeps repo and include-tests flags', () => {
+  it('impact help keeps existing flags and exposes UID selection', () => {
     const result = runHelp('impact');
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('--depth <n>');
     expect(result.stdout).toContain('--include-tests');
     expect(result.stdout).toContain('--repo <name>');
+    expect(result.stdout).toContain('--uid <uid>');
+    expect(result.stdout).toContain('impact [options] [target]');
   });
 
   it('wiki help shows provider, review, and verbose flags', () => {

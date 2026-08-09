@@ -184,6 +184,28 @@ withTestLbugDB(
         expect(allNames).not.toContain('SessionTracker.java');
       });
 
+      it('UID impact preserves Java Class constructor and file traversal', async () => {
+        const context = await backend.callTool('context', {
+          name: 'SessionTracker',
+          file_path: 'api/session/SessionTracker.java',
+        });
+
+        expect(context.status).toBe('found');
+        expect(context.symbol.kind).toBe('Class');
+
+        const result = await backend.callTool('impact', {
+          uid: context.symbol.uid,
+          direction: 'upstream',
+        });
+
+        expect(result).not.toHaveProperty('error');
+        const allNames = Object.values(result.byDepth as Record<string, any[]>)
+          .flat()
+          .map((d: any) => d.name);
+        expect(allNames).toContain('registerSessionTracker');
+        expect(allNames).toContain('ServerBootstrap.java');
+      });
+
       it('RankPermissionHandler: 1 caller via Constructor + 10 importers via File (was 0 before fix)', async () => {
         const result = await backend.callTool('impact', {
           target: 'RankPermissionHandler',

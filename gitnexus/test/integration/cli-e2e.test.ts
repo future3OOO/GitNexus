@@ -384,6 +384,24 @@ describe('CLI end-to-end', () => {
       expect(() => JSON.parse(result.stdout.trim())).not.toThrow();
     });
 
+    it('impact accepts the UID returned by context without a name target', () => {
+      const contextResult = runCliRaw(
+        ['context', 'validateInput', '--file', 'src/validator.ts', '--repo', 'mini-repo'],
+        MINI_REPO,
+      );
+      expect(contextResult.status).toBe(0);
+      const context = JSON.parse(contextResult.stdout.trim());
+
+      const impactResult = runCliRaw(
+        ['impact', '--uid', context.symbol.uid, '--direction', 'upstream', '--repo', 'mini-repo'],
+        MINI_REPO,
+      );
+      expect(impactResult.status).toBe(0);
+      const impact = JSON.parse(impactResult.stdout.trim());
+      expect(impact.target.id).toBe(context.symbol.uid);
+      expect(impact.target.filePath).toBe('src/validator.ts');
+    });
+
     it('stdout is pipeable: cypher output parses as valid JSON', () => {
       const result = runCliRaw(
         ['cypher', 'MATCH (n:Function) RETURN n.name LIMIT 5', '--repo', 'mini-repo'],
