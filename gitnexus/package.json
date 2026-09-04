@@ -46,6 +46,7 @@
     "test:integration": "vitest run test/integration",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:mcp-isolation": "cd .. && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest gitnexus.test.e2e.test_mcp_cypher_isolation",
     "prepare": "node scripts/build.js",
     "prepack": "node scripts/build.js"
   },

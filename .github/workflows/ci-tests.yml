@@ -28,6 +28,10 @@ jobs:
           --coverage.reportOnFailure=true
         working-directory: gitnexus
 
+      - name: Run the MCP cypher isolation attacks
+        run: npm run test:mcp-isolation
+        working-directory: gitnexus
+
       # gitnexus-shared already built by setup-gitnexus action above
       - name: Install gitnexus-web dependencies
         run: npm ci
