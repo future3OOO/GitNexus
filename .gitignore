@@ -89,7 +89,6 @@ GitNexus.sln
 .claude/commands/
 .claude/helpers
 .claude/skills/
-!.claude/skills/gitnexus/
 
 .history/
 
