@@ -518,6 +518,8 @@ const runners = new Map<ChildProcess, { repoId: string; cancel: () => void }>();
 
 // Runs one raw query in its own node process: the engine can segfault on some
 // variable-length path queries, and in-process that takes the whole server down.
+// CommonJS on purpose: worker eval code is CommonJS on Node 20 and only
+// syntax-detected on newer Node, so require() behaves the same on both.
 // The query arrives as one JSON line on stdin, rows leave on fd 3 (the engine
 // writes noise to stdout), and an engine error goes to stderr with exit code 1.
 // The engine call blocks its thread, so it runs in a worker while the main
@@ -525,36 +527,37 @@ const runners = new Map<ChildProcess, { repoId: string; cancel: () => void }>();
 // the kernel closes it when the parent dies by any means, and the child kills
 // itself instead of running on.
 const CYPHER_RUNNER = `// gitnexus-cypher-runner
-import { writeFileSync } from 'fs';
-import { Worker } from 'worker_threads';
+const { writeFileSync } = require('fs');
+const { Worker } = require('worker_threads');
 let buffered = '';
 process.stdin.setEncoding('utf8');
-const query = await new Promise((resolve) => {
-  process.stdin.on('data', (chunk) => {
-    buffered += chunk;
-    const end = buffered.indexOf('\\n');
-    if (end >= 0) resolve(JSON.parse(buffered.slice(0, end)));
-  });
+process.stdin.on('data', (chunk) => {
+  buffered += chunk;
+  const end = buffered.indexOf('\\n');
+  if (end >= 0) run(JSON.parse(buffered.slice(0, end)));
 });
 // process.exit would wait for the worker, which may be stuck in the engine; a signal does not.
 process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
-const worker = new Worker(\`
-  import { parentPort, workerData } from 'worker_threads';
-  import { pathToFileURL } from 'url';
-  const lbug = (await import(pathToFileURL(workerData.engine).href)).default;
-  const db = new lbug.Database(workerData.store, 0, false, true);
-  const conn = new lbug.Connection(db);
-  const result = await conn.query(workerData.query);
-  parentPort.postMessage(JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()));
-\`, { eval: true, workerData: { engine: process.argv[1], store: process.argv[2], query } });
-worker.on('message', (rows) => {
-  writeFileSync(3, rows);
-  process.exit(0);
-});
-worker.on('error', (err) => {
-  process.stderr.write(err instanceof Error ? err.message : String(err));
-  process.exit(1);
-});
+function run(query) {
+  const worker = new Worker(\`
+    const { parentPort, workerData } = require('worker_threads');
+    const lbug = require(workerData.engine);
+    (async () => {
+      const db = new lbug.Database(workerData.store, 0, false, true);
+      const conn = new lbug.Connection(db);
+      const result = await conn.query(workerData.query);
+      parentPort.postMessage(JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()));
+    })().catch((err) => { throw err; });
+  \`, { eval: true, workerData: { engine: process.argv[1], store: process.argv[2], query } });
+  worker.on('message', (rows) => {
+    writeFileSync(3, rows);
+    process.exit(0);
+  });
+  worker.on('error', (err) => {
+    process.stderr.write(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}
 `;
 
 /**
@@ -572,12 +575,20 @@ export const executeQueryIsolated = (repoId: string, cypher: string): Promise<an
     throw new Error('Write operations are not allowed. The pool adapter is read-only.');
   }
 
+  // A Database injected with initLbugWithDb is held open (writable) by this
+  // process, so no other process can take the store's lock: only the
+  // in-process path can serve it. Stores the pool opened itself are read-only
+  // and a child can open them alongside.
+  if (dbCache.get(entry.dbPath)?.external) {
+    return executeQuery(repoId, cypher);
+  }
+
   entry.lastUsed = Date.now();
 
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ['--input-type=module', '-e', CYPHER_RUNNER, '--', ENGINE_MODULE, entry.dbPath],
+      ['-e', CYPHER_RUNNER, '--', ENGINE_MODULE, entry.dbPath],
       { stdio: ['pipe', 'ignore', 'pipe', 'pipe'] },
     );
     const rows: Buffer[] = [];
