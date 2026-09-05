@@ -386,6 +386,16 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertIn("Parser exception", error, marker + f": {result}")
         self.assertLess(elapsed, 10, marker + f": took {elapsed:.1f}s")
 
+    def test_unknown_repo_reply_carries_no_catalogue(self) -> None:
+        # X6R11 03:03:31Z: two invalid selectors returned 10,041 bytes each of unrelated registry names.
+        marker = "NOT_FOUND_REPLY_LISTS_REGISTRY"
+        result = self.client().request("tools/call", {"name": "cypher", "arguments": {"repo": "nope", "query": COUNT}})
+        self.assertIsNotNone(result, marker + " (no response)")
+        text = result["result"]["content"][0]["text"]
+        self.assertIn('"nope"', text, marker + " (selector missing)")
+        self.assertNotIn(REPO, text, marker + f": the registered name leaked: {text[:200]}")
+        self.assertLess(len(text), 500, marker + f": {len(text)} bytes")
+
     def test_timeout_reaps_runner_child(self) -> None:
         marker = "TIMEOUT_LEAKED_CHILD"
         client = self.client()

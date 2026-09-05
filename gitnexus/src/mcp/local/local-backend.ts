@@ -317,13 +317,16 @@ export class LocalBackend {
     if (this.repos.size === 0) {
       throw new Error('No indexed repositories. Run: gitnexus analyze');
     }
+    // No catalogue in the error: the registry can hold thousands of names and
+    // every miss would pour them into the caller's context.
+    const guidance =
+      'Pass "repo" exactly as registered (the packet repo name, or the checkout path after gitnexus analyze); ' +
+      'run "gitnexus list" to see registered repositories.';
     if (repoParam) {
-      const names = [...this.repos.values()].map((h) => h.name);
-      throw new Error(`Repository "${repoParam}" not found. Available: ${names.join(', ')}`);
+      throw new Error(`Repository "${repoParam}" not found. ${guidance}`);
     }
-    const names = [...this.repos.values()].map((h) => h.name);
     throw new Error(
-      `Multiple repositories indexed. Specify which one with the "repo" parameter. Available: ${names.join(', ')}`,
+      `${this.repos.size} repositories are indexed; specify one with the "repo" parameter. ${guidance}`,
     );
   }
 
