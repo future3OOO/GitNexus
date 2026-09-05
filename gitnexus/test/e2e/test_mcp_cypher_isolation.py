@@ -109,10 +109,10 @@ def tearDownModule() -> None:
 class McpClient:
     """Newline-delimited JSON-RPC over the real server's stdio."""
 
-    def __init__(self, entry: list[str], home: Path) -> None:
+    def __init__(self, entry: list[str], home: Path, extra_env: dict[str, str] | None = None) -> None:
         self.process = subprocess.Popen(
             [*entry, "mcp"], cwd=PACKAGE, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env={**os.environ, "HOME": str(home)})
+            stderr=subprocess.PIPE, text=True, env={**os.environ, "HOME": str(home), **(extra_env or {})})
         self.lines: queue.Queue[str | None] = queue.Queue()
         self.next_id = 0
         self.responses: dict[int, dict] = {}
@@ -188,8 +188,8 @@ class McpClient:
 
 
 class McpCypherIsolationTests(unittest.TestCase):
-    def client(self, entry: list[str] = SOURCE_ENTRY) -> McpClient:
-        client = McpClient(entry, HOME)
+    def client(self, entry: list[str] = SOURCE_ENTRY, extra_env: dict[str, str] | None = None) -> McpClient:
+        client = McpClient(entry, HOME, extra_env)
         self.addCleanup(client.close)
         return client
 
@@ -346,6 +346,45 @@ class McpCypherIsolationTests(unittest.TestCase):
             self.skipTest("the seed could not build an FTS index (extension unavailable)")
         result = self.client().call("cypher", {"repo": REPO, "query": "CALL QUERY_FTS_INDEX('Function', 'function_fts', 'target') RETURN node.name AS name"})
         self.assertIn("target", (result or {}).get("markdown", ""), marker + f": {result}")
+
+    def test_large_query_then_disconnect_keeps_the_server_clean(self) -> None:
+        marker = "LARGE_QUERY_DISCONNECT_CRASHED_SERVER"
+        client = self.client()
+        client.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": "/* " + "x" * (4 * 1024 * 1024) + " */ " + COUNT}})
+        client.close()
+        self.assertEqual(client.process.returncode, 0, marker + f": server exited {client.process.returncode}: {client.process.stderr.read()[-400:] if client.process.stderr else ''}")
+        self.assertEqual(runner_pids(), [], marker + f": runner children {runner_pids()}")
+
+    def test_concurrent_raw_queries_share_the_pool_limit(self) -> None:
+        marker = "RUNNERS_EXCEED_POOL_LIMIT"
+        client = self.client()
+        slow = "MATCH (a:Function),(b:Function),(c:Function) WHERE a.startLine + b.startLine + c.startLine = -1 RETURN count(*) AS n"
+        peak = [0]
+        stop = threading.Event()
+
+        def sample() -> None:
+            while not stop.is_set():
+                peak[0] = max(peak[0], len(runner_pids()))
+                time.sleep(0.05)
+
+        sampler = threading.Thread(target=sample, daemon=True)
+        sampler.start()
+        ids = [client.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": slow}}) for _ in range(9)]
+        responses = [client.receive(request_id, timeout=120) for request_id in ids]
+        stop.set()
+        sampler.join()
+        self.assertTrue(all(r is not None and '"row_count": 1' in r["result"]["content"][0]["text"] for r in responses), marker + " (a reply was missing or wrong)")
+        self.assertLessEqual(peak[0], 8, marker + f": {peak[0]} runners observed at once, pool limit is 8")
+
+    def test_engine_error_is_prompt_under_warn_rejections(self) -> None:
+        marker = "ENGINE_ERROR_BECAME_TIMEOUT"
+        client = self.client(extra_env={"NODE_OPTIONS": "--unhandled-rejections=warn"})
+        started = time.monotonic()
+        result = client.call("cypher", {"repo": REPO, "query": "MATCH (n:Nope RETURN n"})
+        elapsed = time.monotonic() - started
+        error = str((result or {}).get("error", ""))
+        self.assertIn("Parser exception", error, marker + f": {result}")
+        self.assertLess(elapsed, 10, marker + f": took {elapsed:.1f}s")
 
     def test_timeout_reaps_runner_child(self) -> None:
         marker = "TIMEOUT_LEAKED_CHILD"

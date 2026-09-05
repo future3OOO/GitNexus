@@ -548,11 +548,15 @@ process.stdin.on('data', (chunk) => {
       // Same policy as the pool: FTS queries fail on their own if the extension is missing.
       try { await conn.query('LOAD EXTENSION fts'); } catch {}
       const result = await conn.query(workerData.query);
-      parentPort.postMessage(JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()));
-    })().catch((err) => { throw err; });
+      parentPort.postMessage({ rows: JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()) });
+    })().catch((err) => parentPort.postMessage({ error: err instanceof Error ? err.message : String(err) }));
   \`, { eval: true, workerData: { engine: process.argv[1], store: process.argv[2], query } });
-  worker.on('message', (rows) => {
-    writeFileSync(3, rows);
+  worker.on('message', (reply) => {
+    if (reply.error !== undefined) {
+      process.stderr.write(reply.error);
+      process.exit(1);
+    }
+    writeFileSync(3, reply.rows);
     process.exit(0);
   });
   worker.on('error', (err) => {
@@ -567,7 +571,7 @@ process.stdin.on('data', (chunk) => {
  * the server down with it. Same contract as executeQuery: read-only, bounded by
  * QUERY_TIMEOUT_MS, rows returned as plain objects.
  */
-export const executeQueryIsolated = (repoId: string, cypher: string): Promise<any[]> => {
+export const executeQueryIsolated = async (repoId: string, cypher: string): Promise<any[]> => {
   const entry = pool.get(repoId);
   if (!entry) {
     throw new Error(`LadybugDB not initialized for repo "${repoId}". Call initLbug first.`);
@@ -587,7 +591,10 @@ export const executeQueryIsolated = (repoId: string, cypher: string): Promise<an
 
   entry.lastUsed = Date.now();
 
-  return new Promise((resolve, reject) => {
+  // Hold a pool slot while the child runs so raw queries share the same
+  // admission limit and waiter timeout as in-process queries.
+  const slot = await checkout(entry);
+  return new Promise<any[]>((resolve, reject) => {
     const child = spawn(
       process.execPath,
       ['-e', CYPHER_RUNNER, '--', ENGINE_MODULE, entry.dbPath],
@@ -608,11 +615,13 @@ export const executeQueryIsolated = (repoId: string, cypher: string): Promise<an
     child.on('error', (err) => {
       runners.delete(child);
       clearTimeout(timer);
+      checkin(entry, slot);
       reject(err);
     });
     child.on('close', (code, signal) => {
       runners.delete(child);
       clearTimeout(timer);
+      checkin(entry, slot);
       if (killed === 'timed out') {
         reject(new Error(`Query timed out after ${QUERY_TIMEOUT_MS}ms`));
         return;
@@ -636,6 +645,9 @@ export const executeQueryIsolated = (repoId: string, cypher: string): Promise<an
         ),
       );
     });
+    // A query larger than the pipe buffer is still being written if the child
+    // is killed or crashes first; 'close' reports what happened to the child.
+    child.stdin!.on('error', () => undefined);
     child.stdin!.write(JSON.stringify(cypher) + '\n');
   });
 };
