@@ -11,6 +11,7 @@ import path from 'path';
 import {
   initLbug,
   executeQuery,
+  executeQueryIsolated,
   executeParameterized,
   closeLbug,
   isLbugReady,
@@ -935,8 +936,7 @@ export class LocalBackend {
     }
 
     try {
-      const result = await executeQuery(repo.id, params.query);
-      return result;
+      return await executeQueryIsolated(repo.id, params.query);
     } catch (err: any) {
       return { error: err.message || 'Query failed' };
     }
