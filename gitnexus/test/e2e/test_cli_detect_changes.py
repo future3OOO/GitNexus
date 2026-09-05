@@ -119,6 +119,15 @@ class DetectChangesCliTests(unittest.TestCase):
         self.assertIn("value", self.names(payload), marker + ": " + json.dumps(payload)[:600])
         self.assert_no_changes(self.detect("-r", str(self.repo), "--scope", "unstaged"), marker)
 
+    def test_an_invalid_scope_is_refused_before_anything_runs(self) -> None:
+        marker = "INVALID_SCOPE_ACCEPTED"
+        (self.repo / "app.py").write_text(EDITED, encoding="utf-8")
+        result = self.cli("detect-changes", "-r", str(self.repo), "--scope", "alll")
+        self.assertNotEqual(result.returncode, 0, marker + ": " + result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "", marker + ": " + result.stdout)
+        for choice in ("unstaged", "staged", "all", "compare"):
+            self.assertIn(choice, result.stderr, marker + ": " + result.stderr)
+
     def test_default_scope_and_long_repo_flag_match_explicit_unstaged(self) -> None:
         marker = "DEFAULT_SCOPE_DRIFTS"
         (self.repo / "app.py").write_text(EDITED, encoding="utf-8")

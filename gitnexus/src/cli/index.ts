@@ -3,7 +3,7 @@
 // Heap re-spawn removed — only analyze.ts needs the 8GB heap (via its own ensureHeap()).
 // Removing it from here improves MCP server startup time significantly.
 
-import { Command } from 'commander';
+import { Command, Option } from 'commander';
 import { createRequire } from 'node:module';
 import { createLazyAction } from './lazy-action.js';
 import { registerGroupCommands } from './group.js';
@@ -145,7 +145,11 @@ program
   .command('detect-changes')
   .description('Map uncommitted git changes to indexed symbols and affected execution flows')
   .option('-r, --repo <name>', 'Target repository')
-  .option('-s, --scope <scope>', 'unstaged (default), staged, all, or compare', 'unstaged')
+  .addOption(
+    new Option('-s, --scope <scope>', 'which changes to map')
+      .choices(['unstaged', 'staged', 'all', 'compare'])
+      .default('unstaged'),
+  )
   .option('--base-ref <ref>', 'Branch/commit for the compare scope')
   .action(createLazyAction(() => import('./tool.js'), 'detectChangesCommand'));
 
