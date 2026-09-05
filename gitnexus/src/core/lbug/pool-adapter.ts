@@ -530,16 +530,16 @@ const CYPHER_RUNNER = `// gitnexus-cypher-runner
 const { writeFileSync } = require('fs');
 const { Worker } = require('worker_threads');
 let buffered = '';
+let worker;
 process.stdin.setEncoding('utf8');
+// process.exit would wait for the worker, which may be stuck in the engine; a signal does not.
+process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
 process.stdin.on('data', (chunk) => {
   buffered += chunk;
   const end = buffered.indexOf('\\n');
-  if (end >= 0) run(JSON.parse(buffered.slice(0, end)));
-});
-// process.exit would wait for the worker, which may be stuck in the engine; a signal does not.
-process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
-function run(query) {
-  const worker = new Worker(\`
+  if (end < 0 || worker) return;
+  const query = JSON.parse(buffered.slice(0, end));
+  worker = new Worker(\`
     const { parentPort, workerData } = require('worker_threads');
     const lbug = require(workerData.engine);
     (async () => {
@@ -557,7 +557,7 @@ function run(query) {
     process.stderr.write(err instanceof Error ? err.message : String(err));
     process.exit(1);
   });
-}
+});
 `;
 
 /**
