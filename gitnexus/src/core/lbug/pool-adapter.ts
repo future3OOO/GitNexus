@@ -15,7 +15,10 @@
  * from the same Database is the officially supported concurrency pattern.
  */
 
+import { spawn, type ChildProcess } from 'child_process';
 import fs from 'fs/promises';
+import { createRequire } from 'module';
+import type { Readable } from 'stream';
 import lbug from '@ladybugdb/core';
 
 /** Per-repo pool: one Database, many Connections */
@@ -508,6 +511,152 @@ export const executeQuery = async (repoId: string, cypher: string): Promise<any[
   }
 };
 
+const ENGINE_MODULE = createRequire(import.meta.url).resolve('@ladybugdb/core');
+
+// Live runner children by repo, so closing a repo (or shutting down) reaps them.
+const runners = new Map<ChildProcess, { repoId: string; cancel: () => void }>();
+
+// Runs one raw query in its own node process: the engine can segfault on some
+// variable-length path queries, and in-process that takes the whole server down.
+// CommonJS on purpose: worker eval code is CommonJS on Node 20 and only
+// syntax-detected on newer Node, so require() behaves the same on both.
+// The query arrives as one JSON line on stdin, rows leave on fd 3 (the engine
+// writes noise to stdout), and an engine error goes to stderr with exit code 1.
+// The engine call blocks its thread, so it runs in a worker while the main
+// thread watches stdin: the parent keeps stdin open for the child's lifetime,
+// the kernel closes it when the parent dies by any means, and the child kills
+// itself instead of running on.
+const CYPHER_RUNNER = `// gitnexus-cypher-runner
+const { writeFileSync } = require('fs');
+const { Worker } = require('worker_threads');
+let buffered = '';
+let worker;
+process.stdin.setEncoding('utf8');
+// process.exit would wait for the worker, which may be stuck in the engine; a signal does not.
+process.stdin.on('end', () => process.kill(process.pid, 'SIGKILL'));
+process.stdin.on('data', (chunk) => {
+  buffered += chunk;
+  const end = buffered.indexOf('\\n');
+  if (end < 0 || worker) return;
+  const query = JSON.parse(buffered.slice(0, end));
+  worker = new Worker(\`
+    const { parentPort, workerData } = require('worker_threads');
+    const lbug = require(workerData.engine);
+    (async () => {
+      const db = new lbug.Database(workerData.store, 0, false, true);
+      const conn = new lbug.Connection(db);
+      // Same policy as the pool: FTS queries fail on their own if the extension is missing.
+      try { await conn.query('LOAD EXTENSION fts'); } catch {}
+      const result = await conn.query(workerData.query);
+      parentPort.postMessage({ rows: JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()) });
+    })().catch((err) => parentPort.postMessage({ error: err instanceof Error ? err.message : String(err) }));
+  \`, { eval: true, workerData: { engine: process.argv[1], store: process.argv[2], query } });
+  worker.on('message', (reply) => {
+    if (reply.error !== undefined) {
+      process.stderr.write(reply.error);
+      process.exit(1);
+    }
+    writeFileSync(3, reply.rows);
+    process.exit(0);
+  });
+  worker.on('error', (err) => {
+    process.stderr.write(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+});
+`;
+
+/**
+ * Execute a raw Cypher query in a child process so an engine crash cannot take
+ * the server down with it. Same contract as executeQuery: read-only, bounded by
+ * QUERY_TIMEOUT_MS, rows returned as plain objects.
+ */
+export const executeQueryIsolated = async (repoId: string, cypher: string): Promise<any[]> => {
+  const entry = pool.get(repoId);
+  if (!entry) {
+    throw new Error(`LadybugDB not initialized for repo "${repoId}". Call initLbug first.`);
+  }
+
+  if (isWriteQuery(cypher)) {
+    throw new Error('Write operations are not allowed. The pool adapter is read-only.');
+  }
+
+  // A Database injected with initLbugWithDb is held open (writable) by this
+  // process, so no other process can take the store's lock: only the
+  // in-process path can serve it. Stores the pool opened itself are read-only
+  // and a child can open them alongside.
+  if (dbCache.get(entry.dbPath)?.external) {
+    return executeQuery(repoId, cypher);
+  }
+
+  entry.lastUsed = Date.now();
+
+  // Hold a pool slot while the child runs so raw queries share the same
+  // admission limit and waiter timeout as in-process queries.
+  const slot = await checkout(entry);
+  return new Promise<any[]>((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      ['-e', CYPHER_RUNNER, '--', ENGINE_MODULE, entry.dbPath],
+      { stdio: ['pipe', 'ignore', 'pipe', 'pipe'] },
+    );
+    const rows: Buffer[] = [];
+    const errors: Buffer[] = [];
+    let killed: 'timed out' | 'cancelled' | null = null;
+    const kill = (why: 'timed out' | 'cancelled') => {
+      killed = why;
+      child.kill('SIGKILL');
+    };
+    (child.stdio[3] as Readable).on('data', (chunk: Buffer) => rows.push(chunk));
+    child.stderr!.on('data', (chunk: Buffer) => errors.push(chunk));
+    const timer = setTimeout(() => kill('timed out'), QUERY_TIMEOUT_MS);
+    runners.set(child, { repoId, cancel: () => kill('cancelled') });
+    // A failed spawn emits 'error' and then 'close'; the slot goes back once.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      runners.delete(child);
+      clearTimeout(timer);
+      checkin(entry, slot);
+    };
+
+    child.on('error', (err) => {
+      release();
+      reject(err);
+    });
+    child.on('close', (code, signal) => {
+      release();
+      if (killed === 'timed out') {
+        reject(new Error(`Query timed out after ${QUERY_TIMEOUT_MS}ms`));
+        return;
+      }
+      if (killed === 'cancelled') {
+        reject(new Error('Query cancelled: the repository connection was closed'));
+        return;
+      }
+      if (code === 0) {
+        resolve(JSON.parse(Buffer.concat(rows).toString('utf8')));
+        return;
+      }
+      const message = Buffer.concat(errors).toString('utf8').trim();
+      if (code === 1 && message) {
+        reject(new Error(message));
+        return;
+      }
+      reject(
+        new Error(
+          `Query crashed the graph engine (${signal ?? `exit code ${code}`}); the server is still up.`,
+        ),
+      );
+    });
+    // A query larger than the pipe buffer is still being written if the child
+    // is killed or crashes first; 'close' reports what happened to the child.
+    child.stdin!.on('error', () => undefined);
+    child.stdin!.write(JSON.stringify(cypher) + '\n');
+  });
+};
+
 /**
  * Execute a parameterized query on a specific repo's connection pool.
  * Uses prepare/execute pattern to prevent Cypher injection.
@@ -550,6 +699,10 @@ export const executeParameterized = async (
  * If omitted, close all repos.
  */
 export const closeLbug = async (repoId?: string): Promise<void> => {
+  for (const runner of runners.values()) {
+    if (!repoId || runner.repoId === repoId) runner.cancel();
+  }
+
   if (repoId) {
     closeOne(repoId);
     return;
