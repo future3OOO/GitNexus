@@ -611,17 +611,22 @@ export const executeQueryIsolated = async (repoId: string, cypher: string): Prom
     child.stderr!.on('data', (chunk: Buffer) => errors.push(chunk));
     const timer = setTimeout(() => kill('timed out'), QUERY_TIMEOUT_MS);
     runners.set(child, { repoId, cancel: () => kill('cancelled') });
-
-    child.on('error', (err) => {
+    // A failed spawn emits 'error' and then 'close'; the slot goes back once.
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
       runners.delete(child);
       clearTimeout(timer);
       checkin(entry, slot);
+    };
+
+    child.on('error', (err) => {
+      release();
       reject(err);
     });
     child.on('close', (code, signal) => {
-      runners.delete(child);
-      clearTimeout(timer);
-      checkin(entry, slot);
+      release();
       if (killed === 'timed out') {
         reject(new Error(`Query timed out after ${QUERY_TIMEOUT_MS}ms`));
         return;
