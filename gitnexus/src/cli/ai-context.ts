@@ -75,14 +75,16 @@ function generateGitNexusContent(
           .join('\n')
       : '';
 
-  const skillsTable = `| Task | Read this skill file (installed by \`gitnexus setup\`) |
-|------|---------------------|
-| Understand architecture / "How does X work?" | \`~/.claude/skills/gitnexus-exploring/SKILL.md\` |
-| Blast radius / "What breaks if I change X?" | \`~/.claude/skills/gitnexus-impact-analysis/SKILL.md\` |
-| Trace bugs / "Why is X failing?" | \`~/.claude/skills/gitnexus-debugging/SKILL.md\` |
-| Rename / extract / split / refactor | \`~/.claude/skills/gitnexus-refactoring/SKILL.md\` |
-| Tools, resources, schema reference | \`~/.claude/skills/gitnexus-guide/SKILL.md\` |
-| Index, status, clean, wiki CLI commands | \`~/.claude/skills/gitnexus-cli/SKILL.md\` |${generatedRows ? '\n' + generatedRows : ''}`;
+  const skillsTable = `Built-in skills are installed by \`gitnexus setup\` into your editor's skills directory (Claude Code \`~/.claude/skills/\`, Cursor \`~/.cursor/skills/\`, OpenCode \`~/.config/opencode/skill/\`, Codex \`~/.agents/skills/\`), each as \`<skill>/SKILL.md\`. Generated skills are files in this repository.
+
+| Task | Skill |
+|------|-------|
+| Understand architecture / "How does X work?" | \`gitnexus-exploring\` |
+| Blast radius / "What breaks if I change X?" | \`gitnexus-impact-analysis\` |
+| Trace bugs / "Why is X failing?" | \`gitnexus-debugging\` |
+| Rename / extract / split / refactor | \`gitnexus-refactoring\` |
+| Tools, resources, schema reference | \`gitnexus-guide\` |
+| Index, status, clean, wiki CLI commands | \`gitnexus-cli\` |${generatedRows ? '\n' + generatedRows : ''}`;
 
   return `${GITNEXUS_START_MARKER}
 # GitNexus — Code Intelligence
