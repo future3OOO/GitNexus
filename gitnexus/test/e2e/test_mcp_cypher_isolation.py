@@ -81,6 +81,10 @@ def setUpModule() -> None:
     repo = HOME / "repo"
     storage = repo / ".gitnexus"
     storage.mkdir(parents=True)
+    # The engine resolves LOAD EXTENSION under $HOME/.lbdb/extension; give the isolated HOME the installed copy.
+    installed = Path.home() / ".lbdb" / "extension"
+    if installed.is_dir():
+        shutil.copytree(installed, HOME / ".lbdb" / "extension")
     seeded = node_module(SEED_SCRIPT, str(PACKAGE / "dist" / "core" / "lbug" / "schema.js"), str(storage / "lbug"), "300", "1500")
     if seeded.returncode != 0:
         raise RuntimeError(f"seeding failed: {seeded.stderr[-800:]}")
