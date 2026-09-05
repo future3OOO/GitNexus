@@ -161,10 +161,19 @@ export async function cypherCommand(
     process.exit(1);
   }
 
-  const backend = await getBackend();
-  const result = await backend.callTool('cypher', {
-    query,
-    repo: options?.repo,
-  });
-  output(result);
+  try {
+    const backend = await getBackend();
+    const result = await backend.callTool('cypher', {
+      query,
+      repo: options?.repo,
+    });
+    output(result);
+  } catch (err: unknown) {
+    // A bad repo selector or transport failure is an answer, not a stack trace.
+    output({
+      error:
+        (err instanceof Error ? err.message : String(err)) || 'Cypher query failed unexpectedly',
+    });
+    process.exit(1);
+  }
 }

@@ -396,6 +396,15 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertNotIn(REPO, text, marker + f": the registered name leaked: {text[:200]}")
         self.assertLess(len(text), 500, marker + f": {len(text)} bytes")
 
+    def test_cli_unknown_repo_is_an_error_not_a_stack_trace(self) -> None:
+        marker = "CLI_NOT_FOUND_DUMPS_STACK"
+        result = subprocess.run([*SOURCE_ENTRY, "cypher", "-r", "nope", COUNT], cwd=PACKAGE, text=True, capture_output=True,
+                                env={**os.environ, "HOME": str(HOME)}, timeout=300)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn('"nope"', result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
+        self.assertLess(len(result.stdout + result.stderr), 500, marker + f": {len(result.stdout + result.stderr)} bytes")
+
     def test_timeout_reaps_runner_child(self) -> None:
         marker = "TIMEOUT_LEAKED_CHILD"
         client = self.client()
