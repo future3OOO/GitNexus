@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -59,7 +60,10 @@ HOME: Path | None = None
 
 
 def runner_pids() -> list[str]:
-    return subprocess.run(["pgrep", "-f", "gitnexus-cypher-runner"], text=True, capture_output=True).stdout.split()
+    """Runner children of this module's store only: the store path is in the runner's argv, so
+    concurrent suites elsewhere on the machine do not contaminate the cleanup assertions."""
+    pattern = "gitnexus-cypher-runner.*" + re.escape(str(HOME / "repo" / ".gitnexus" / "lbug"))
+    return subprocess.run(["pgrep", "-f", pattern], text=True, capture_output=True).stdout.split()
 
 
 def node_module(script: str, *args: str, timeout: int = 600) -> subprocess.CompletedProcess[str]:
