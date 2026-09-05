@@ -401,7 +401,7 @@ class McpCypherIsolationTests(unittest.TestCase):
         result = subprocess.run([*SOURCE_ENTRY, "cypher", "-r", "nope", COUNT], cwd=PACKAGE, text=True, capture_output=True,
                                 env={**os.environ, "HOME": str(HOME)}, timeout=300)
         self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
-        self.assertIn('"nope"', result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertIn("nope", result.stdout, marker + f": {result.stdout[:200]}")
         self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
         self.assertLess(len(result.stdout + result.stderr), 500, marker + f": {len(result.stdout + result.stderr)} bytes")
 

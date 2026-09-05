@@ -326,7 +326,7 @@ export class LocalBackend {
       throw new Error(`Repository "${repoParam}" not found. ${guidance}`);
     }
     throw new Error(
-      `${this.repos.size} repositories are indexed; specify one with the "repo" parameter. ${guidance}`,
+      `Multiple repositories indexed (${this.repos.size}). Specify which one with the "repo" parameter. ${guidance}`,
     );
   }
 
