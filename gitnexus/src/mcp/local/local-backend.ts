@@ -320,8 +320,8 @@ export class LocalBackend {
     // No catalogue in the error: the registry can hold thousands of names and
     // every miss would pour them into the caller's context.
     const guidance =
-      'Pass "repo" exactly as registered (the packet repo name, or the checkout path after gitnexus analyze); ' +
-      'run "gitnexus list" to see registered repositories.';
+      'Pass "repo" exactly as registered: the analysis packet\'s repo name, or the checkout\'s absolute path ' +
+      'after "gitnexus analyze" on it. Run "gitnexus status" inside the checkout to see how it is registered.';
     if (repoParam) {
       throw new Error(`Repository "${repoParam}" not found. ${guidance}`);
     }
