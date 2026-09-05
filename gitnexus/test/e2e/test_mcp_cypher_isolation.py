@@ -46,7 +46,7 @@ for (let i = 0; i < n; i++) await run(`CREATE (:Function {id: 'f${i}', name: '${
 const types = ['CALLS', 'CALLS', 'CALLS', 'IMPORTS', 'DEFINES'];
 for (let e = 0; e < m; e++) { const a = Math.floor(rand() * n), b = Math.floor(rand() * n); const t = types[Math.floor(rand() * types.length)];
   await run(`MATCH (a:Function {id:'f${a}'}),(b:Function {id:'f${b}'}) CREATE (a)-[:CodeRelation {type:'${t}', confidence: 1.0, reason: 'seed', step: 0}]->(b)`); }
-console.log('seeded');
+try { await run('LOAD EXTENSION fts'); await run("CALL CREATE_FTS_INDEX('Function', 'function_fts', ['name'])"); console.log('seeded fts'); } catch (e) { console.log('seeded'); }
 """
 QUERY_SCRIPT = """
 const lbug = (await import(process.argv[1])).default;
@@ -72,6 +72,7 @@ def node_module(script: str, *args: str, timeout: int = 600) -> subprocess.Compl
 
 
 CRASH_SIGNAL: int | None = None
+FTS_INDEXED = False
 
 
 def setUpModule() -> None:
@@ -89,7 +90,8 @@ def setUpModule() -> None:
         "name": REPO, "path": str(repo), "storagePath": str(storage),
         "indexedAt": "2026-09-05T00:00:00.000Z", "lastCommit": "seed", "stats": {"files": 1, "nodes": 300},
     }]), encoding="utf-8")
-    global CRASH_SIGNAL
+    global CRASH_SIGNAL, FTS_INDEXED
+    FTS_INDEXED = 'seeded fts' in seeded.stdout
     probe = node_module(QUERY_SCRIPT, str(HOME / "repo" / ".gitnexus" / "lbug"), CRASH)
     CRASH_SIGNAL = probe.returncode if probe.returncode in (-11, 139) else None
 
@@ -331,6 +333,13 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertIn("Ran 0 tests", run.stdout + run.stderr, marker + f": rc={run.returncode} {(run.stdout + run.stderr)[-300:]}")
         workflow = (PACKAGE.parent / ".github" / "workflows" / "ci-tests.yml").read_text(encoding="utf-8")
         self.assertIn("npm run test:mcp-isolation", workflow, marker + " (ci-tests.yml never runs the module)")
+
+    def test_fts_call_answers_through_the_child(self) -> None:
+        marker = "FTS_UNAVAILABLE_IN_CHILD"
+        if not FTS_INDEXED:
+            self.skipTest("the seed could not build an FTS index (extension unavailable)")
+        result = self.client().call("cypher", {"repo": REPO, "query": "CALL QUERY_FTS_INDEX('Function', 'function_fts', 'target') RETURN node.name AS name"})
+        self.assertIn("target", (result or {}).get("markdown", ""), marker + f": {result}")
 
     def test_timeout_reaps_runner_child(self) -> None:
         marker = "TIMEOUT_LEAKED_CHILD"

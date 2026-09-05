@@ -545,6 +545,8 @@ process.stdin.on('data', (chunk) => {
     (async () => {
       const db = new lbug.Database(workerData.store, 0, false, true);
       const conn = new lbug.Connection(db);
+      // Same policy as the pool: FTS queries fail on their own if the extension is missing.
+      try { await conn.query('LOAD EXTENSION fts'); } catch {}
       const result = await conn.query(workerData.query);
       parentPort.postMessage(JSON.stringify(await (Array.isArray(result) ? result[0] : result).getAll()));
     })().catch((err) => { throw err; });
