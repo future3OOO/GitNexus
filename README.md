@@ -91,6 +91,14 @@ Enterprise includes:
 - [CONTRIBUTING.md](CONTRIBUTING.md) — license, setup, commits, and pull requests
 - [TESTING.md](TESTING.md) — test commands for `gitnexus` and `gitnexus-web`
 
+Installing with dependency install scripts disabled works without a compiler:
+
+```bash
+cd gitnexus && npm ci --ignore-scripts && npm run build
+```
+
+The build places the LadybugDB native binary from its platform package (`@ladybugdb/core-<platform>-<arch>`), and the Kotlin grammar loads from the prebuilds it ships, so neither needs an install script or a toolchain.
+
 ## CLI + MCP (recommended)
 
 The CLI indexes your repository and runs an MCP server that gives AI agents deep codebase awareness.

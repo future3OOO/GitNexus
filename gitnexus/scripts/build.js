@@ -3,6 +3,7 @@
  * Build script that compiles gitnexus and inlines gitnexus-shared into the dist.
  *
  * Steps:
+ *  0. Place the LadybugDB native binary if dependency install scripts were skipped
  *  1. Build gitnexus-shared (tsc)
  *  2. Build gitnexus (tsc)
  *  3. Copy gitnexus-shared/dist → dist/_shared
@@ -10,6 +11,7 @@
  */
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -18,6 +20,23 @@ const ROOT = path.resolve(__dirname, '..');
 const SHARED_ROOT = path.resolve(ROOT, '..', 'gitnexus-shared');
 const DIST = path.join(ROOT, 'dist');
 const SHARED_DEST = path.join(DIST, '_shared');
+
+// ── 0. LadybugDB binary ────────────────────────────────────────────
+// @ladybugdb/core ships lbugjs.node in a platform package and copies it into
+// itself from its install script; under npm ignore-scripts that never runs.
+const lbugCore = path.dirname(createRequire(import.meta.url).resolve('@ladybugdb/core'));
+const lbugBinary = path.join(lbugCore, 'lbugjs.node');
+if (!fs.existsSync(lbugBinary)) {
+  const platformPackage = `@ladybugdb/core-${process.platform}-${process.arch}`;
+  const platformBinary = path.join(
+    path.dirname(
+      createRequire(path.join(lbugCore, 'index.js')).resolve(`${platformPackage}/package.json`),
+    ),
+    'lbugjs.node',
+  );
+  fs.copyFileSync(platformBinary, lbugBinary);
+  console.log(`[build] placed LadybugDB binary from ${platformPackage}`);
+}
 
 // ── 1. Build gitnexus-shared ───────────────────────────────────────
 console.log('[build] compiling gitnexus-shared…');
