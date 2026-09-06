@@ -330,8 +330,10 @@ function mapToGraph(
       properties: {
         name: extracted.programName,
         filePath,
-        startLine: 1,
-        endLine: lines.length,
+        // The extractor reports 1-based lines; nodes store 0-based lines like every
+        // tree-sitter language, so every range below subtracts one.
+        startLine: 0,
+        endLine: lines.length - 1,
         language: SupportedLanguages.Cobol,
         isExported: true,
         description: metaDesc || undefined,
@@ -365,8 +367,8 @@ function mapToGraph(
       properties: {
         name: prog.name,
         filePath,
-        startLine: prog.startLine,
-        endLine: prog.endLine,
+        startLine: prog.startLine - 1,
+        endLine: prog.endLine - 1,
         language: SupportedLanguages.Cobol,
         isExported: true,
         description: `nested-program${prog.isCommon ? ' common' : ''}`,
@@ -413,8 +415,8 @@ function mapToGraph(
       properties: {
         name: sec.name,
         filePath,
-        startLine: sec.line,
-        endLine: nextLine,
+        startLine: sec.line - 1,
+        endLine: nextLine - 1,
         language: SupportedLanguages.Cobol,
         isExported: true,
       },
@@ -448,8 +450,8 @@ function mapToGraph(
       properties: {
         name: para.name,
         filePath,
-        startLine: para.line,
-        endLine: nextLine,
+        startLine: para.line - 1,
+        endLine: nextLine - 1,
         language: SupportedLanguages.Cobol,
         isExported: true,
       },
@@ -482,8 +484,8 @@ function mapToGraph(
       properties: {
         name: item.name,
         filePath,
-        startLine: item.line,
-        endLine: item.line,
+        startLine: item.line - 1,
+        endLine: item.line - 1,
         language: SupportedLanguages.Cobol,
         description: `level:${item.level} section:${item.section}${item.pic ? ` pic:${item.pic}` : ''}`,
       },
@@ -585,8 +587,8 @@ function mapToGraph(
         properties: {
           name: `CALL ${call.target}`,
           filePath,
-          startLine: call.line,
-          endLine: call.line,
+          startLine: call.line - 1,
+          endLine: call.line - 1,
           language: SupportedLanguages.Cobol,
           description: 'dynamic-call (target is a data item, not resolvable statically)',
         },

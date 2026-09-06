@@ -70,14 +70,16 @@ export const processMarkdown = (
 
       const sectionId = generateId('Section', `${file.path}:L${lineNum}:${heading}`);
 
+      // Stored lines are 0-based like every tree-sitter language; lineNum stays 1-based
+      // only for the id label above.
       const node: GraphNode = {
         id: sectionId,
         label: 'Section',
         properties: {
           name: heading,
           filePath: file.path,
-          startLine: lineNum,
-          endLine,
+          startLine: lineNum - 1,
+          endLine: endLine - 1,
           level,
           description: `h${level}`,
         },

@@ -238,6 +238,38 @@ class DetectChangesCliTests(unittest.TestCase):
         tight = [s["name"] for s in payload["changed_symbols"] if s["filePath"] == "tight.py"]
         self.assertEqual(tight, [], marker + ": " + json.dumps(payload)[:600])
 
+    def test_editing_a_markdown_heading_line_reports_that_section(self) -> None:
+        marker = "MARKDOWN_HEADING_EDIT_MAPPED_TO_PREVIOUS_SECTION"
+        # Sibling headings: a nested heading would also lie inside its parent section.
+        content = "# Intro\n\nHello.\n\n# Setup\n\nSteps.\n"
+        self.commit_and_analyze("guide.md", content)
+        (self.repo / "guide.md").write_text(content.replace("# Setup\n", "# Setup   \n"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"Setup"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_editing_a_cobol_paragraph_line_reports_that_paragraph(self) -> None:
+        marker = "COBOL_PARAGRAPH_EDIT_MAPPED_TO_PREVIOUS_PARAGRAPH"
+        content = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. DEMO.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       PARA-A.\n"
+            "           DISPLAY 'A'.\n"
+            "       PARA-B.\n"
+            "           DISPLAY 'B'.\n"
+            "           STOP RUN.\n"
+        )
+        self.commit_and_analyze("prog.cbl", content)
+        (self.repo / "prog.cbl").write_text(content.replace("       PARA-B.\n", "       PARA-B.   \n"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        # The program Module spans the whole file, like a class around an edited method.
+        cobol = {s["name"] for s in payload["changed_symbols"] if s["filePath"] == "prog.cbl"}
+        self.assertEqual(cobol, {"DEMO", "PARA-B"}, marker + ": " + json.dumps(payload)[:600])
+
     def test_an_unknown_repo_is_refused_as_json(self) -> None:
         self.assert_refused_as_json(self.cli("detect-changes", "-r", str(self.tmp / "nowhere")),
                                     "DETECT_CHANGES_BAD_REPO_NOT_REFUSED")
