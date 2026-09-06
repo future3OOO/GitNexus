@@ -229,6 +229,10 @@ class McpCypherIsolationTests(unittest.TestCase):
             self.skipTest("the engine hung instead of crashing on this run; the timeout reply already shows the server survived")
         self.assertIn("relationships(p)", error, marker + f": {error}")
         self.assertIn("impact", error, marker + f": {error}")
+        # The signal branch fires for crashes of any origin, so the trigger is offered as a
+        # possibility conditional on the caller's query, never asserted as this crash's cause.
+        self.assertIn("if your query has that shape", error, f"CRASH_REPLY_ASSERTS_CAUSE_UNCONDITIONALLY: {error}")
+        self.assertNotIn("Known trigger:", error, f"CRASH_REPLY_ASSERTS_CAUSE_UNCONDITIONALLY: {error}")
 
     def test_cypher_description_names_the_trigger_and_the_alternative(self) -> None:
         marker = "CYPHER_DESCRIPTION_LACKS_GUIDANCE"
