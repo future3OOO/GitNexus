@@ -27,6 +27,7 @@ import {
   cleanupOldKuzuFiles,
   type RegistryEntry,
 } from '../../storage/repo-manager.js';
+import { samePath } from '../../storage/paths.js';
 import { GroupService, type GroupToolPort } from '../../core/group/service.js';
 // AI context generation is CLI-only (gitnexus analyze)
 // import { generateAIContextFiles } from '../../cli/ai-context.js';
@@ -284,7 +285,7 @@ export class LocalBackend {
     const base = name.toLowerCase();
     // Check for name collision with a different path
     for (const [id, handle] of this.repos) {
-      if (id === base && path.resolve(handle.repoPath) !== path.resolve(repoPath)) {
+      if (id === base && !samePath(handle.repoPath, repoPath)) {
         // Collision — use path hash
         const hash = Buffer.from(repoPath).toString('base64url').slice(0, 6);
         return `${base}-${hash}`;

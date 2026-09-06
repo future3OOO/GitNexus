@@ -9,6 +9,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { samePath } from './paths.js';
 
 export interface RepoMeta {
   repoPath: string;
@@ -254,11 +255,7 @@ export const registerRepo = async (repoPath: string, meta: RepoMeta): Promise<vo
   const { storagePath } = getStoragePaths(resolved);
 
   const entries = await readRegistry();
-  const existing = entries.findIndex((e) => {
-    const a = path.resolve(e.path);
-    const b = resolved;
-    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-  });
+  const existing = entries.findIndex((e) => samePath(e.path, resolved));
 
   const entry: RegistryEntry = {
     name,

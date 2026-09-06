@@ -44,8 +44,29 @@ withTestLbugDB(
         });
 
         expect(result.error, `${marker}: ${JSON.stringify(result.error)}`).toBeUndefined();
-        expect(result.target.id, marker).toBe(context.symbol.uid);
+        // The failure fallback echoes the uid back as target.id; only a resolved target carries its file.
+        expect(result.target.filePath, marker).toBe('src/auth.ts');
       });
+
+      it.skipIf(process.platform !== 'win32')(
+        'a re-registration that only changes path casing keeps the repo id on Windows',
+        async () => {
+          const marker = 'REPO_EVICTED_ON_CASE_CHANGE';
+          const context = await backend.callTool('context', { repo: 'test-repo', name: 'login' });
+          expect(context.status).toBe('found');
+          const [entry] = await listRegisteredRepos();
+          vi.mocked(listRegisteredRepos).mockResolvedValue([{ ...entry, path: '/TEST/REPO/' }]);
+
+          const result = await backend.callTool('impact', {
+            repo: 'test-repo',
+            uid: context.symbol.uid,
+            direction: 'upstream',
+          });
+
+          expect(result.error, `${marker}: ${JSON.stringify(result.error)}`).toBeUndefined();
+          expect(result.target.filePath, marker).toBe('src/auth.ts');
+        },
+      );
     });
   },
   {
