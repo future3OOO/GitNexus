@@ -45,6 +45,16 @@ describe('CLI help surface', () => {
     expect(result.stdout).toContain('impact [options] [target]');
   });
 
+  it('detect-changes help exposes repo, scope, and base-ref selection', () => {
+    const result = runHelp('detect-changes');
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain('detect-changes [options]');
+    expect(result.stdout).toContain('--repo <name>');
+    expect(result.stdout).toContain('--scope <scope>');
+    expect(result.stdout).toContain('--base-ref <ref>');
+  });
+
   it('wiki help shows provider, review, and verbose flags', () => {
     const result = runHelp('wiki');
 

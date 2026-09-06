@@ -22,12 +22,12 @@ let _backend: LocalBackend | null = null;
 
 async function getBackend(): Promise<LocalBackend> {
   if (_backend) return _backend;
-  _backend = new LocalBackend();
-  const ok = await _backend.init();
-  if (!ok) {
-    console.error('GitNexus: No indexed repositories found. Run: gitnexus analyze');
-    process.exit(1);
+  const backend = new LocalBackend();
+  if (!(await backend.init())) {
+    // Thrown, not printed: every command answers with its own JSON error and exit 1.
+    throw new Error('No indexed repositories found. Run: gitnexus analyze');
   }
+  _backend = backend;
   return _backend;
 }
 
@@ -147,6 +147,18 @@ export async function impactCommand(
     direction: options?.direction || 'upstream',
     maxDepth: options?.depth ? parseInt(options.depth, 10) : undefined,
     includeTests: options?.includeTests ?? false,
+    repo: options?.repo,
+  });
+}
+
+export async function detectChangesCommand(options?: {
+  repo?: string;
+  scope?: string;
+  baseRef?: string;
+}): Promise<void> {
+  await call('detect_changes', {
+    scope: options?.scope || 'unstaged',
+    base_ref: options?.baseRef,
     repo: options?.repo,
   });
 }
