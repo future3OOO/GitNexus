@@ -1060,8 +1060,9 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         analysis = payload.get("analysis", {})
         self.assertEqual(self.names(payload), {"Service", "compute"}, marker + ": the ordinary edit must still be attributed: " + json.dumps(payload)[:600])
         self.assertEqual(analysis.get("status"), "partial", marker + ": " + json.dumps(analysis))
-        self.assertTrue(any("uote.py" in gap["path"] for gap in analysis.get("gaps", [])),
-                        marker + ": the dropped path must be named: " + json.dumps(analysis))
+        paths = [gap["path"] for gap in analysis.get("gaps", [])]
+        self.assertIn(quoted, paths,
+                      "QUOTED_GAP_PATH_IS_A_RAW_HEADER: the gap must name the file itself: " + json.dumps(analysis))
 
     def test_the_worktree_capture_does_not_copy_an_unignored_index_database(self) -> None:
         marker = "INDEX_DATABASE_COPIED_INTO_OBJECT_STORE"
@@ -1083,8 +1084,40 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         def size(report: str) -> int:
             return int(dict(line.split(": ") for line in report.splitlines())["size"])
 
-        self.assertLess(size(after) - size(before), 1024,
+        # Tight enough to discriminate: the add-then-drop capture writes about 250 KiB here.
+        self.assertLess(size(after) - size(before), 64,
                         marker + f": the object store grew by {size(after) - size(before)} KiB\n{before}\n{after}")
+
+    def test_a_committed_index_directory_is_not_in_the_captured_tree(self) -> None:
+        marker = "TRACKED_INDEX_DIRECTORY_CAPTURED"
+        # read-tree seeds whatever HEAD holds, so a committed .gitnexus survives the add's
+        # exclusion and would land in the snapshot unless it is dropped from the tree too.
+        (self.cache / ".gitignore").write_text("nothing-here\n", encoding="utf-8")
+        (self.cache / ".gitnexus").mkdir(exist_ok=True)
+        (self.cache / ".gitnexus" / "state").write_text("committed\n", encoding="utf-8")
+        self.git(self.cache, "add", "-A", "-f")
+        self.git(self.cache, "commit", "-q", "-m", "commit the index directory")
+        self.assertIn(".gitnexus/state", self.git(self.cache, "ls-files"), marker + ": the fixture must commit it")
+
+        self.analyze_cache("--force")
+
+        tree = self.meta().get("indexedTree")
+        self.assertIsNotNone(tree, marker + ": " + json.dumps(self.meta()))
+        listed = self.git(self.cache, "ls-tree", "-r", "--name-only", tree)
+        self.assertNotIn(".gitnexus/", listed, marker + ": the snapshot still carries the index directory")
+        self.assertIn("svc.py", listed, marker + ": the snapshot must still carry the source")
+
+    def test_a_quoted_path_with_escapes_is_decoded_in_the_gap(self) -> None:
+        marker = "QUOTED_GAP_PATH_IS_A_RAW_HEADER"
+        # Git quotes any name holding a control character, and escapes it C-style over bytes.
+        tabbed = "ta\tb.py"
+        self.commit_and_sync({tabbed: "def one():\n    return 1\n"})
+        (self.source / tabbed).write_text("def one():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        paths = [gap["path"] for gap in payload["analysis"].get("gaps", [])]
+        self.assertIn(tabbed, paths, marker + ": " + json.dumps(payload["analysis"]))
 
     def test_the_capture_does_not_copy_an_unignored_index_database(self) -> None:
         marker = "INDEX_DATABASE_COPIED_INTO_OBJECT_STORE"

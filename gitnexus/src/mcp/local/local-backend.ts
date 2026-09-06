@@ -1786,7 +1786,38 @@ export class LocalBackend {
     const gaps: Array<{ path: string; reason: string }> = [];
     const reasons: string[] = [];
     for (const header of droppedHeaders) {
-      gaps.push({ path: header, reason: 'git quoted this path, so the diff header could not be mapped to a file' });
+      // The header reads `"a/<escaped>" "b/<escaped>"`; its first token names the file.
+      // Git's quoting is C-style over bytes, so the escapes are decoded into bytes and the
+      // bytes read back as UTF-8 — decoding per character would split a multi-byte name.
+      const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(header);
+      let named: string;
+      if (quoted) {
+        const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+        const bytes: number[] = [];
+        for (let at = 0; at < quoted[1].length; ) {
+          if (quoted[1][at] !== '\\') {
+            bytes.push(...Buffer.from(quoted[1][at], 'utf-8'));
+            at += 1;
+            continue;
+          }
+          const octal = /^[0-7]{3}/.exec(quoted[1].slice(at + 1));
+          if (octal) {
+            bytes.push(parseInt(octal[0], 8));
+            at += 4;
+            continue;
+          }
+          const next = quoted[1][at + 1] ?? '';
+          bytes.push(escapes[next] ?? Buffer.from(next, 'utf-8')[0]);
+          at += 2;
+        }
+        named = Buffer.from(bytes).toString('utf-8');
+      } else {
+        named = header.split(' ')[0];
+      }
+      gaps.push({
+        path: named.replace(/^a\//, ''),
+        reason: 'git quoted this path, so its diff header could not be mapped to a file',
+      });
     }
     if (params.worktree === undefined && params.scope !== 'staged') {
       try {

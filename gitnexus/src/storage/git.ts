@@ -101,10 +101,20 @@ export const writeWorkingTree = (repoPath: string): string => {
     git('read-tree', hasHead ? 'HEAD' : '--empty');
     // The checkout's own ignore rules decide what is content, including the user's global
     // excludes file, so nothing they ignore is captured, and overriding core.excludesFile
-    // would capture whatever the user ignores only there. The index directory is dropped
-    // afterwards rather than through a pathspec, because `git add` refuses a pathspec
-    // naming an already-ignored path and analyze writes that ignore rule itself.
-    git('add', '-A', '--', '.');
+    // would capture whatever the user ignores only there. An unignored index directory is
+    // excluded up front rather than dropped from the tree afterwards: `git add` writes its
+    // blobs before any later removal can help, measured at 252 KiB of unreachable objects
+    // per capture on a 16 MB database. `git add` refuses a pathspec naming an
+    // already-ignored path, so the pathspec is passed only when the rule is absent.
+    let ignoresIndex = true;
+    try {
+      execFileSync('git', ['check-ignore', '-q', '--', '.gitnexus'], { cwd: repoPath, stdio: 'ignore' });
+    } catch {
+      ignoresIndex = false;
+    }
+    git('add', '-A', '--', '.', ...(ignoresIndex ? [] : [':(exclude).gitnexus']));
+    // The pathspec stops `add` from writing the directory's blobs, but `read-tree HEAD`
+    // has already seeded any copy committed to HEAD, so the entry is dropped as well.
     git('rm', '--cached', '-r', '-q', '--ignore-unmatch', '--', '.gitnexus');
     return git('write-tree');
   } finally {
