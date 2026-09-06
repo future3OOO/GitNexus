@@ -317,13 +317,23 @@ export class LocalBackend {
     if (this.repos.size === 0) {
       throw new Error('No indexed repositories. Run: gitnexus analyze');
     }
+    // No catalogue in the error: the registry can hold thousands of names and
+    // every miss would pour them into the caller's context.
+    const guidance =
+      'Pass "repo" exactly as registered: the analysis packet\'s repo name, or the checkout\'s absolute path ' +
+      'after "gitnexus analyze" on it. Run "gitnexus status" inside the checkout to see how it is registered.';
     if (repoParam) {
-      const names = [...this.repos.values()].map((h) => h.name);
-      throw new Error(`Repository "${repoParam}" not found. Available: ${names.join(', ')}`);
+      // Echo the selector only while the reply stays bounded on both transports, and
+      // echo it JSON-escaped so quotes and line breaks cannot deform the text reply.
+      const escaped = JSON.stringify(repoParam);
+      const shown =
+        Buffer.byteLength(escaped) <= 122
+          ? escaped
+          : `selector of ${Buffer.byteLength(repoParam)} bytes`;
+      throw new Error(`Repository ${shown} not found. ${guidance}`);
     }
-    const names = [...this.repos.values()].map((h) => h.name);
     throw new Error(
-      `Multiple repositories indexed. Specify which one with the "repo" parameter. Available: ${names.join(', ')}`,
+      `Multiple repositories indexed (${this.repos.size}). Specify which one with the "repo" parameter. ${guidance}`,
     );
   }
 
