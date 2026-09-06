@@ -22,12 +22,12 @@ let _backend: LocalBackend | null = null;
 
 async function getBackend(): Promise<LocalBackend> {
   if (_backend) return _backend;
-  _backend = new LocalBackend();
-  const ok = await _backend.init();
-  if (!ok) {
-    console.error('GitNexus: No indexed repositories found. Run: gitnexus analyze');
-    process.exit(1);
+  const backend = new LocalBackend();
+  if (!(await backend.init())) {
+    // Thrown, not printed: every command answers with its own JSON error and exit 1.
+    throw new Error('No indexed repositories found. Run: gitnexus analyze');
   }
+  _backend = backend;
   return _backend;
 }
 
@@ -40,6 +40,10 @@ async function getBackend(): Promise<LocalBackend> {
  * and write directly to the real stdout fd (#324).
  *
  * Falls back to stderr if the fd write fails (e.g., broken pipe).
+ *
+ * A structured `{ error }` result exits 1: the JSON is the answer, the exit
+ * status is the verdict, so scripts and hooks can branch on it. The status is
+ * set, not forced, so a stderr fallback on an asynchronous pipe still flushes.
  */
 function output(data: any): void {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
@@ -53,6 +57,22 @@ function output(data: any): void {
     }
     // Fallback: stderr (previous behavior, works on all platforms)
     process.stderr.write(text + '\n');
+  }
+  if (data && typeof data === 'object' && 'error' in data) process.exitCode = 1;
+}
+
+/**
+ * Run one tool call and hand its result to output(). A thrown failure — a bad
+ * repo selector, a transport fault — is an answer, not a stack trace.
+ */
+async function call(name: string, args: Record<string, unknown>): Promise<void> {
+  try {
+    const backend = await getBackend();
+    output(await backend.callTool(name, args));
+  } catch (err: unknown) {
+    output({
+      error: (err instanceof Error ? err.message : String(err)) || `${name} failed unexpectedly`,
+    });
   }
 }
 
@@ -71,8 +91,7 @@ export async function queryCommand(
     process.exit(1);
   }
 
-  const backend = await getBackend();
-  const result = await backend.callTool('query', {
+  await call('query', {
     query: queryText,
     task_context: options?.context,
     goal: options?.goal,
@@ -80,7 +99,6 @@ export async function queryCommand(
     include_content: options?.content ?? false,
     repo: options?.repo,
   });
-  output(result);
 }
 
 export async function contextCommand(
@@ -97,15 +115,13 @@ export async function contextCommand(
     process.exit(1);
   }
 
-  const backend = await getBackend();
-  const result = await backend.callTool('context', {
+  await call('context', {
     name: name || undefined,
     uid: options?.uid,
     file_path: options?.file,
     include_content: options?.content ?? false,
     repo: options?.repo,
   });
-  output(result);
 }
 
 export async function impactCommand(
@@ -125,29 +141,26 @@ export async function impactCommand(
     process.exit(1);
   }
 
-  try {
-    const backend = await getBackend();
-    const result = await backend.callTool('impact', {
-      target: target || undefined,
-      uid: options?.uid,
-      direction: options?.direction || 'upstream',
-      maxDepth: options?.depth ? parseInt(options.depth, 10) : undefined,
-      includeTests: options?.includeTests ?? false,
-      repo: options?.repo,
-    });
-    output(result);
-  } catch (err: unknown) {
-    // Belt-and-suspenders: catch infrastructure failures (getBackend, callTool transport)
-    // The backend's impact() already returns structured errors for graph query failures
-    output({
-      error:
-        (err instanceof Error ? err.message : String(err)) || 'Impact analysis failed unexpectedly',
-      target: options?.uid ? { id: options.uid } : { name: target },
-      direction: options?.direction || 'upstream',
-      suggestion: 'Try reducing --depth or using gitnexus context <symbol> as a fallback',
-    });
-    process.exit(1);
-  }
+  await call('impact', {
+    target: target || undefined,
+    uid: options?.uid,
+    direction: options?.direction || 'upstream',
+    maxDepth: options?.depth ? parseInt(options.depth, 10) : undefined,
+    includeTests: options?.includeTests ?? false,
+    repo: options?.repo,
+  });
+}
+
+export async function detectChangesCommand(options?: {
+  repo?: string;
+  scope?: string;
+  baseRef?: string;
+}): Promise<void> {
+  await call('detect_changes', {
+    scope: options?.scope || 'unstaged',
+    base_ref: options?.baseRef,
+    repo: options?.repo,
+  });
 }
 
 export async function cypherCommand(
@@ -161,10 +174,5 @@ export async function cypherCommand(
     process.exit(1);
   }
 
-  const backend = await getBackend();
-  const result = await backend.callTool('cypher', {
-    query,
-    repo: options?.repo,
-  });
-  output(result);
+  await call('cypher', { query, repo: options?.repo });
 }

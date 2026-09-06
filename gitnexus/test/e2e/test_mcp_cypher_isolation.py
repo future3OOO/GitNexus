@@ -217,6 +217,31 @@ class McpCypherIsolationTests(unittest.TestCase):
             self.skipTest("the engine hung instead of crashing on this run; the timeout reply already shows the server survived")
         self.assertIn("SIGSEGV", str(crashed.get("error", "")), marker + f": {crashed}")
 
+    def test_crash_reply_names_the_trigger_and_the_alternative(self) -> None:
+        # claude-skills#197: a caller who reads only the crash reply must learn the known
+        # trigger and where to go instead, or its next move is another crashed child.
+        marker = "CRASH_REPLY_LACKS_GUIDANCE"
+        self.require_crash()
+        crashed = self.client().call("cypher", {"repo": REPO, "query": CRASH})
+        self.assertIsNotNone(crashed, marker + " (no response)")
+        error = str(crashed.get("error", ""))
+        if "timed out" in error:
+            self.skipTest("the engine hung instead of crashing on this run; the timeout reply already shows the server survived")
+        self.assertIn("relationships(p)", error, marker + f": {error}")
+        self.assertIn("impact", error, marker + f": {error}")
+        # The signal branch fires for crashes of any origin, so the trigger is offered as a
+        # possibility conditional on the caller's query, never asserted as this crash's cause.
+        self.assertIn("if your query has that shape", error, f"CRASH_REPLY_ASSERTS_CAUSE_UNCONDITIONALLY: {error}")
+        self.assertNotIn("Known trigger:", error, f"CRASH_REPLY_ASSERTS_CAUSE_UNCONDITIONALLY: {error}")
+
+    def test_cypher_description_names_the_trigger_and_the_alternative(self) -> None:
+        marker = "CYPHER_DESCRIPTION_LACKS_GUIDANCE"
+        listed = self.client().request("tools/list", {})
+        self.assertIsNotNone(listed, marker + " (no response)")
+        [cypher] = [tool for tool in listed["result"]["tools"] if tool["name"] == "cypher"]
+        self.assertIn("relationships(p)", cypher["description"], marker + f": {cypher['description'][:300]}")
+        self.assertIn("impact", cypher["description"], marker + f": {cypher['description'][:300]}")
+
     def test_other_tools_answer_after_crash(self) -> None:
         marker = "OTHER_TOOLS_DEAD_AFTER_CRASH"
         self.require_crash()
@@ -385,6 +410,165 @@ class McpCypherIsolationTests(unittest.TestCase):
         error = str((result or {}).get("error", ""))
         self.assertIn("Parser exception", error, marker + f": {result}")
         self.assertLess(elapsed, 10, marker + f": took {elapsed:.1f}s")
+
+    def test_unknown_repo_reply_carries_no_catalogue(self) -> None:
+        # X6R11 03:03:31Z: two invalid selectors returned 10,041 bytes each of unrelated registry names.
+        marker = "NOT_FOUND_REPLY_LISTS_REGISTRY"
+        result = self.client().request("tools/call", {"name": "cypher", "arguments": {"repo": "nope", "query": COUNT}})
+        self.assertIsNotNone(result, marker + " (no response)")
+        text = result["result"]["content"][0]["text"]
+        self.assertIn('"nope"', text, marker + " (selector missing)")
+        self.assertNotIn(REPO, text, marker + f": the registered name leaked: {text[:200]}")
+        self.assertLess(len(text.encode("utf-8")), 500, marker + f": {len(text.encode('utf-8'))} bytes")
+
+    def test_unknown_repo_reply_bounds_the_selector_echo(self) -> None:
+        marker = "NOT_FOUND_REPLY_UNBOUNDED_SELECTOR_ECHO"
+        result = self.client().request("tools/call", {"name": "cypher", "arguments": {"repo": "x" * 3000, "query": COUNT}})
+        self.assertIsNotNone(result, marker + " (no response)")
+        text = result["result"]["content"][0]["text"]
+        self.assertIn("not found", text, marker + f": {text[:200]}")
+        self.assertNotIn(REPO, text, marker + f": the registered name leaked: {text[:200]}")
+        self.assertLess(len(text.encode("utf-8")), 500, marker + f": {len(text.encode('utf-8'))} bytes")
+
+    def cli(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run([*SOURCE_ENTRY, *args], cwd=PACKAGE, text=True, capture_output=True,
+                              env={**os.environ, "HOME": str(HOME)}, timeout=300)
+
+    def test_cli_unknown_repo_is_an_error_not_a_stack_trace(self) -> None:
+        marker = "CLI_NOT_FOUND_DUMPS_STACK"
+        result = self.cli("cypher", "-r", "nope", COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("nope", result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
+        combined = (result.stdout + result.stderr).encode("utf-8")
+        self.assertLess(len(combined), 500, marker + f": {len(combined)} bytes")
+
+    def test_cli_structured_error_exits_one(self) -> None:
+        marker = "CLI_STRUCTURED_ERROR_EXITS_ZERO"
+        result = self.cli("cypher", "-r", REPO, "THIS IS NOT CYPHER")
+        self.assertIn("error", json.loads(result.stdout), marker + f": {result.stdout[:200]}")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+
+    def test_cli_context_not_found_exits_one(self) -> None:
+        marker = "CLI_CONTEXT_ERROR_EXITS_ZERO"
+        result = self.cli("context", "nope", "-r", REPO)
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+
+    def test_cli_valid_cypher_exits_zero(self) -> None:
+        marker = "CLI_SUCCESS_EXIT_CHANGED"
+        result = self.cli("cypher", "-r", REPO, COUNT)
+        self.assertEqual(result.returncode, 0, marker + f": exit {result.returncode} {result.stderr[-300:]}")
+        self.assertEqual(json.loads(result.stdout).get("row_count"), 1, marker + f": {result.stdout[:200]}")
+
+    def test_cli_impact_unknown_target_exits_one(self) -> None:
+        marker = "CLI_IMPACT_ERROR_EXITS_ZERO"
+        result = self.cli("impact", "nope", "-r", REPO)
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+
+    def test_cli_not_found_reply_bounds_serialized_echo(self) -> None:
+        # JSON.stringify writes U+0001 as six ASCII bytes; the bound has to hold after that expansion.
+        marker = "CLI_NOT_FOUND_SERIALIZED_ECHO_UNBOUNDED"
+        result = self.cli("cypher", "-r", "\x01" * 120, COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("not found", result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
+
+    def test_cli_not_found_reply_names_a_multibyte_selector_by_size(self) -> None:
+        marker = "NOT_FOUND_MULTIBYTE_CUTOFF_UNBOUNDED"
+        result = self.cli("cypher", "-r", "é" * 100, COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("selector of 200 bytes", result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
+
+    def test_cli_query_unknown_repo_is_an_error_not_a_stack_trace(self) -> None:
+        marker = "CLI_QUERY_NOT_FOUND_DUMPS_STACK"
+        result = self.cli("query", "-r", "nope", "anything")
+        self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+
+    def test_cli_context_unknown_repo_is_an_error_not_a_stack_trace(self) -> None:
+        marker = "CLI_CONTEXT_NOT_FOUND_DUMPS_STACK"
+        result = self.cli("context", "nope", "-r", "nope")
+        self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+
+    def test_cli_impact_unknown_repo_is_an_error_not_a_stack_trace(self) -> None:
+        marker = "CLI_IMPACT_NOT_FOUND_DUMPS_STACK"
+        result = self.cli("impact", "target", "-r", "nope")
+        self.assertNotIn("    at ", result.stdout + result.stderr, marker + " (stack trace printed)")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+
+    def test_cli_impact_not_found_reply_does_not_echo_the_target(self) -> None:
+        marker = "CLI_IMPACT_NOT_FOUND_ENVELOPE_UNBOUNDED"
+        result = self.cli("impact", "a" * 600, "-r", "nope")
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("nope", str(json.loads(result.stdout).get("error")), marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
+
+    def test_cli_query_success_exits_zero(self) -> None:
+        marker = "CLI_QUERY_SUCCESS_EXIT_CHANGED"
+        result = self.cli("query", "target", "-r", REPO)
+        self.assertEqual(result.returncode, 0, marker + f": exit {result.returncode} {result.stderr[-300:]}")
+        self.assertIn("definitions", json.loads(result.stdout), marker + f": {result.stdout[:200]}")
+
+    def test_cli_context_success_exits_zero(self) -> None:
+        marker = "CLI_CONTEXT_SUCCESS_EXIT_CHANGED"
+        result = self.cli("context", "target", "-r", REPO)
+        self.assertEqual(result.returncode, 0, marker + f": exit {result.returncode} {result.stderr[-300:]}")
+        self.assertEqual(json.loads(result.stdout).get("status"), "found", marker + f": {result.stdout[:200]}")
+
+    def test_cli_impact_success_exits_zero(self) -> None:
+        marker = "CLI_IMPACT_SUCCESS_EXIT_CHANGED"
+        result = self.cli("impact", "target", "-r", REPO)
+        self.assertEqual(result.returncode, 0, marker + f": exit {result.returncode} {result.stderr[-300:]}")
+        self.assertEqual(json.loads(result.stdout).get("target", {}).get("name"), "target", marker + f": {result.stdout[:200]}")
+
+    def test_cli_not_found_reply_names_a_quote_selector_by_size(self) -> None:
+        marker = "NOT_FOUND_QUOTE_CUTOFF_UNBOUNDED"
+        result = self.cli("cypher", "-r", '"' * 61, COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("selector of 61 bytes", result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
+
+    def cli_with_full_stdout(self, *args: str) -> subprocess.CompletedProcess[str]:
+        # The emitter's own outgoing boundary: fd 1 refuses every write, so the fallback path runs.
+        if not os.path.exists("/dev/full"):
+            self.skipTest("/dev/full is not available on this platform")
+        with open("/dev/full", "w") as full:
+            return subprocess.run([*SOURCE_ENTRY, *args], cwd=PACKAGE, text=True, stdout=full, stderr=subprocess.PIPE,
+                                  env={**os.environ, "HOME": str(HOME)}, timeout=300)
+
+    def test_cli_success_survives_a_failed_stdout_write(self) -> None:
+        marker = "CLI_STDOUT_FAILURE_LOSES_RESULT"
+        result = self.cli_with_full_stdout("cypher", "-r", REPO, COUNT)
+        self.assertEqual(result.returncode, 0, marker + f": exit {result.returncode} {result.stderr[-300:]}")
+        self.assertEqual(json.loads(result.stderr).get("row_count"), 1, marker + f": {result.stderr[:200]}")
+
+    def test_cli_error_survives_a_failed_stdout_write(self) -> None:
+        marker = "CLI_STDOUT_FAILURE_LOSES_ERROR"
+        result = self.cli_with_full_stdout("cypher", "-r", "nope", COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("not found", str(json.loads(result.stderr).get("error")), marker + f": {result.stderr[:200]}")
+
+    def test_cli_not_found_reply_names_a_backslash_selector_by_size(self) -> None:
+        marker = "NOT_FOUND_BACKSLASH_CUTOFF_UNBOUNDED"
+        result = self.cli("cypher", "-r", "\\" * 61, COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn("selector of 61 bytes", result.stdout, marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
+
+    def test_cli_not_found_reply_echoes_a_selector_that_fits(self) -> None:
+        # Sixty quotes serialize to exactly the 122-byte budget: admitted, echoed escaped, still bounded.
+        marker = "NOT_FOUND_ADMITTED_SELECTOR_DROPPED"
+        result = self.cli("cypher", "-r", '"' * 60, COUNT)
+        self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
+        self.assertIn(json.dumps('"' * 60), json.loads(result.stdout).get("error", ""), marker + f": {result.stdout[:200]}")
+        self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
 
     def test_timeout_reaps_runner_child(self) -> None:
         marker = "TIMEOUT_LEAKED_CHILD"
