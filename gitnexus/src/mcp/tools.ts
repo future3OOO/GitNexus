@@ -183,25 +183,30 @@ NOTE: ACCESSES edges (field read/write tracking) are included in context results
   },
   {
     name: 'detect_changes',
-    description: `Analyze uncommitted git changes and find affected execution flows.
-Maps git diff hunks to indexed symbols, then traces which processes are impacted.
+    description: `Analyze git changes and find affected execution flows and impacted tests.
+Maps git diff hunks to indexed symbols, traces which processes are impacted, and lists the tests upstream of the changed symbols (impact --direction upstream --include-tests reachability).
 
 WHEN TO USE: Before committing — to understand what your changes affect. Pre-commit review, PR preparation.
 AFTER THIS: Review affected processes. Use context() on high-risk symbols. READ gitnexus://repo/{name}/process/{name} for full traces.
 
-Returns: changed symbols, affected processes, and a risk summary.`,
+Returns: changed symbols, affected processes, impacted_tests, a risk summary, and analysis {status: complete|partial|unavailable, reasons, gaps} — a gap names a changed path the graph cannot attribute.`,
     inputSchema: {
       type: 'object',
       properties: {
         scope: {
           type: 'string',
-          description: 'What to analyze: "unstaged" (default), "staged", "all", or "compare"',
+          description:
+            'Same-checkout changes to analyze: "unstaged" (used when omitted), "staged", "all", or "compare". Not accepted together with worktree.',
           enum: ['unstaged', 'staged', 'all', 'compare'],
-          default: 'unstaged',
         },
         base_ref: {
           type: 'string',
           description: 'Branch/commit for "compare" scope (e.g., "main")',
+        },
+        worktree: {
+          type: 'string',
+          description:
+            'Root of an edited checkout whose whole working tree (staged, unstaged, untracked) is diffed against the indexed snapshot of "repo"; its HEAD must descend from the indexed commit.',
         },
         repo: {
           type: 'string',

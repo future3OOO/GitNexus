@@ -236,7 +236,7 @@ gitnexus group status <name>     # Check staleness of repos in a group
 | `query`          | Process-grouped hybrid search (BM25 + semantic + RRF)             | Optional       |
 | `context`        | 360-degree symbol view — categorized refs, process participation | Optional       |
 | `impact`         | Blast radius analysis with depth grouping and confidence          | Optional       |
-| `detect_changes` | Git-diff impact — maps changed lines to affected processes       | Optional       |
+| `detect_changes` | Git-diff impact — changed lines to affected processes and impacted tests; `worktree` diffs another checkout against the indexed snapshot | Optional       |
 | `rename`         | Multi-file coordinated rename with graph + text search            | Optional       |
 | `cypher`         | Raw Cypher graph queries                                          | Optional       |
 | `group_list`     | List configured repository groups                                 | —             |
