@@ -2017,10 +2017,13 @@ export class LocalBackend {
       },
     );
     if (!traversalComplete)
-      reasons.push('upstream traversal failed part-way: impacted_tests may be incomplete');
+      reasons.push(
+        'upstream traversal failed part-way: impacted_tests, incoming_edges and uncovered_symbols may be incomplete',
+      );
     // How many callers the graph knows for each changed symbol, so an empty impacted_tests
     // set is readable: zero here means no caller is known at all, while a non-zero count
-    // means callers are known and none of them is a test.
+    // means callers are known and none of them is a test. A failed walk yields zeros too,
+    // which is why the reason above names these fields and the status reads partial.
     for (const sym of changedSymbols) {
       sym.incoming_edges = edgesIntoSeed.get(String(sym.id)) ?? 0;
       if (sym.incoming_edges === 0) uncoveredSymbols += 1;
