@@ -323,7 +323,11 @@ export class LocalBackend {
       'Pass "repo" exactly as registered: the analysis packet\'s repo name, or the checkout\'s absolute path ' +
       'after "gitnexus analyze" on it. Run "gitnexus status" inside the checkout to see how it is registered.';
     if (repoParam) {
-      throw new Error(`Repository "${repoParam}" not found. ${guidance}`);
+      // Echo the selector only while the reply stays bounded on both transports: the
+      // CLI JSON-escapes control characters, so the budget is the serialized form.
+      const fits = Buffer.byteLength(JSON.stringify(repoParam)) <= 122;
+      const shown = fits ? `"${repoParam}"` : `selector of ${Buffer.byteLength(repoParam)} bytes`;
+      throw new Error(`Repository ${shown} not found. ${guidance}`);
     }
     throw new Error(
       `Multiple repositories indexed (${this.repos.size}). Specify which one with the "repo" parameter. ${guidance}`,
