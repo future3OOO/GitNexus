@@ -148,8 +148,10 @@ program
   )
   .option('-r, --repo <name>', 'Target repository (the indexed checkout)')
   .addOption(
-    new Option('-s, --scope <scope>', 'which changes to map (default: unstaged; not with --worktree)')
-      .choices(['unstaged', 'staged', 'all', 'compare']),
+    new Option(
+      '-s, --scope <scope>',
+      'which changes to map (default: unstaged; not with --worktree)',
+    ).choices(['unstaged', 'staged', 'all', 'compare']),
   )
   .option('--base-ref <ref>', 'Branch/commit for the compare scope')
   .option(

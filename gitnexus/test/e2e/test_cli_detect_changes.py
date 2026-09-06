@@ -503,6 +503,19 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertTrue(result.stdout.lstrip().startswith("{"), marker + ": " + result.stdout + result.stderr)
         return json.loads(result.stdout)
 
+    def incoming(self, payload: dict, marker: str) -> dict[str, int]:
+        """Each changed symbol's incoming_edges, keyed by name."""
+        counts = {}
+        for symbol in payload["changed_symbols"]:
+            self.assertIn("incoming_edges", symbol, marker + ": " + json.dumps(symbol))
+            counts[symbol["name"]] = symbol["incoming_edges"]
+        return counts
+
+    def cypher_rows(self, query: str, marker: str) -> list[str]:
+        result = self.cli("cypher", query, "-r", str(self.cache))
+        self.assertEqual(result.returncode, 0, marker + ": " + result.stdout + result.stderr)
+        return json.loads(result.stdout)["markdown"].splitlines()[2:]
+
     def refusal(self, result: subprocess.CompletedProcess[str], marker: str) -> dict:
         self.assertEqual(result.returncode, 1, marker + ": " + result.stdout + result.stderr)
         self.assertTrue(result.stdout.lstrip().startswith("{"), marker + ": " + result.stdout + result.stderr)
@@ -1158,6 +1171,255 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertIn("indexedTree", json.loads((self.source / ".gitnexus" / "meta.json").read_text(encoding="utf-8")),
                       marker + ": the snapshot must still be recorded")
 
+    def test_incoming_edges_is_an_exact_direct_edge_count(self) -> None:
+        marker = "INCOMING_EDGES_NOT_AN_EXACT_COUNT"
+        # Three direct callers and one that reaches target only through a direct caller: the
+        # count is edges into the symbol, so the transitive one must not raise it.
+        self.commit_and_sync({
+            "target.py": "def target():\n    return 1\n",
+            "callers.py": ("from target import target\n\n\ndef one():\n    return target()\n\n\n"
+                           "def two():\n    return target()\n\n\ndef three():\n    return target()\n\n\n"
+                           "def transitive():\n    return one()\n"),
+        })
+        (self.source / "target.py").write_text("def target():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        counts = self.incoming(payload, marker)
+        self.assertEqual(counts.get("target"), 3, marker + ": " + json.dumps(payload["changed_symbols"]))
+        reached = {item["name"] for item in payload.get("impacted_tests", [])}
+        self.assertNotIn("transitive", reached, marker + ": a transitive caller is not a test either")
+
+    def test_an_unfollowed_relation_kind_is_not_counted(self) -> None:
+        marker = "UNFOLLOWED_RELATION_COUNTED"
+        # The walk follows CALLS/IMPORTS/EXTENDS/IMPLEMENTS and the override kinds. A file's
+        # CONTAINS/DEFINES edge into a symbol is an incoming edge git's graph records but the
+        # walk does not follow, so it must not raise the count.
+        self.commit_and_sync({"lonely.py": "def lonely():\n    return 1\n"})
+        (self.source / "lonely.py").write_text("def lonely():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+        raw = self.cypher_rows(
+            "MATCH (a)-[r:CodeRelation]->(n) WHERE n.id = 'Function:lonely.py:lonely' RETURN a.id AS caller, r.type AS relType",
+            marker)
+
+        self.assertTrue(any("DEFINES" in row or "CONTAINS" in row for row in raw),
+                        marker + ": the fixture needs an unfollowed incoming edge: " + "\n".join(raw))
+        self.assertEqual(self.incoming(payload, marker).get("lonely"), 0,
+                         marker + ": " + json.dumps(payload["changed_symbols"]))
+
+    def test_a_test_caller_shows_in_the_count_and_in_impacted_tests(self) -> None:
+        marker = "INCOMING_EDGES_MISSING_FOR_TEST_CALLER"
+        self.edit_compute()
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        self.assertGreaterEqual(self.incoming(payload, marker).get("compute", 0), 1,
+                                marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertIn("test_compute", {item["name"] for item in payload["impacted_tests"]},
+                      marker + ": " + json.dumps(payload["impacted_tests"])[:400])
+
+    def test_a_production_only_caller_is_not_read_as_uncovered(self) -> None:
+        marker = "CALLED_SYMBOL_READ_AS_UNCOVERED"
+        # This is the case the slice exists for: callers known, none of them a test.
+        self.commit_and_sync({
+            "engine.py": "def engine():\n    return 1\n",
+            "driver.py": "from engine import engine\n\n\ndef driver():\n    return engine()\n",
+        })
+        (self.source / "engine.py").write_text("def engine():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        counts = self.incoming(payload, marker)
+        self.assertGreaterEqual(counts.get("engine", 0), 1, marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual(payload["impacted_tests"], [], marker + ": " + json.dumps(payload["impacted_tests"]))
+        self.assertEqual(payload["analysis"].get("uncovered_symbols"), 0,
+                         marker + ": a symbol with a caller is not uncovered: " + json.dumps(payload["analysis"]))
+
+    def test_an_incomplete_walk_publishes_null_rather_than_zero(self) -> None:
+        marker = "UNMEASURED_COVERAGE_PUBLISHED_AS_ZERO"
+        # Zero already means "no caller is known", so publishing it for a symbol nobody
+        # measured states a fact that was never checked.
+        #
+        # The only way this suite can reach an incomplete walk is a name holding an
+        # apostrophe, which breaks the depth-1 query's own escaping at local-backend.ts:2533
+        # while the symbol lookup still succeeds. That is a real defect and a legitimate fix
+        # target, so this attack is deliberately coupled to it: the alternatives are a
+        # substituted collaborator, which the mock ban forbids, or no coverage at all.
+        # Whoever fixes the escaping will see the first assertion below fail with this
+        # message rather than watch the attack pass vacuously — at that point the walk can no
+        # longer be made to fail through the supported Interface, and this attack should be
+        # deleted with the proof gap recorded, not repaired with a fake driver.
+        self.commit_and_sync({"o'ne.py": "def apostrophe():\n    return 1\n"})
+        (self.source / "o'ne.py").write_text("def apostrophe():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        analysis = payload["analysis"]
+        self.assertEqual(analysis["status"], "partial",
+                         marker + ": the apostrophe no longer fails the depth-1 query, so this attack has lost its"
+                         " only real driver; delete it and record the proof gap. " + json.dumps(analysis))
+        self.assertIsNone(analysis["uncovered_symbols"],
+                          marker + ": an unmeasured count is not zero: " + json.dumps(analysis))
+        for symbol in payload["changed_symbols"]:
+            self.assertIsNone(symbol["incoming_edges"],
+                              marker + ": an unmeasured count is not zero: " + json.dumps(symbol))
+        self.assertTrue(any("incoming_edges" in reason for reason in analysis["reasons"]),
+                        marker + ": the reason must name the fields: " + json.dumps(analysis))
+
+    def test_the_reading_rule_matches_a_path_rule_blind_spot(self) -> None:
+        marker = "DESCRIPTION_PROMISES_A_FALSE_INFERENCE"
+        # isTestFilePath classifies by path, so a root-level test_ file is not a test to this
+        # tool. Its call still counts, impacted_tests stays empty and the file is unchanged,
+        # so a description promising the test caller is in changed_symbols would be false.
+        self.commit_and_sync({
+            "engine.py": "def engine():\n    return 1\n",
+            "test_svc.py": "from engine import engine\n\n\ndef test_engine():\n    assert engine() == 1\n",
+        })
+        (self.source / "engine.py").write_text("def engine():\n    return 2\n", encoding="utf-8")
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+
+        payload = self.payload(self.detect_worktree(), marker)
+        listed = client.request("tools/list", {})
+
+        self.assertGreaterEqual(self.incoming(payload, marker).get("engine", 0), 1,
+                                marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual(payload["impacted_tests"], [], marker + ": " + json.dumps(payload["impacted_tests"]))
+        self.assertNotIn("test_engine", self.names(payload),
+                         marker + ": the caller is unchanged, so it is not a changed symbol either")
+        self.assertIsNotNone(listed, marker + ": the MCP server gave no tool list")
+        (tool,) = [t for t in listed["result"]["tools"] if t["name"] == "detect_changes"]
+        self.assertNotIn("are themselves in changed_symbols", tool["description"],
+                         marker + ": that inference is false for a caller the path rule does not classify")
+        self.assertIn("not classified as a test by the path rule", tool["description"],
+                      marker + ": " + tool["description"][-400:])
+
+    def test_a_symbol_with_no_callers_is_counted_as_uncovered(self) -> None:
+        marker = "UNCOVERED_SYMBOL_NOT_COUNTED"
+        self.commit_and_sync({"orphan.py": "def orphan():\n    return 1\n"})
+        (self.source / "orphan.py").write_text("def orphan():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        self.assertEqual(self.incoming(payload, marker).get("orphan"), 0, marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual(payload["analysis"].get("uncovered_symbols"), 1, marker + ": " + json.dumps(payload["analysis"]))
+
+    def test_the_uncovered_count_is_exact(self) -> None:
+        marker = "UNCOVERED_COUNT_NOT_EXACT"
+        # Two covered and two uncovered in one change set, then an all-covered change set.
+        self.commit_and_sync({
+            "mixed.py": ("def covered_one():\n    return 1\n\n\ndef covered_two():\n    return 2\n\n\n"
+                         "def bare_one():\n    return 3\n\n\ndef bare_two():\n    return 4\n"),
+            "users.py": ("from mixed import covered_one, covered_two\n\n\n"
+                         "def use():\n    return covered_one() + covered_two()\n"),
+        })
+        (self.source / "mixed.py").write_text(
+            "def covered_one():\n    return 9\n\n\ndef covered_two():\n    return 9\n\n\n"
+            "def bare_one():\n    return 9\n\n\ndef bare_two():\n    return 9\n", encoding="utf-8")
+
+        mixed = self.payload(self.detect_worktree(), marker)
+        # The all-covered case edits only symbols that have callers: compute and its class.
+        self.git(self.source, "checkout", "--", "mixed.py")
+        self.edit_compute()
+        covered = self.payload(self.detect_worktree(), marker)
+
+        self.assertEqual(mixed["analysis"].get("uncovered_symbols"), 2,
+                         marker + ": " + json.dumps({"symbols": mixed["changed_symbols"], "analysis": mixed["analysis"]})[:900])
+        self.assertEqual(covered["analysis"].get("uncovered_symbols"), 0,
+                         marker + ": " + json.dumps({"symbols": covered["changed_symbols"], "analysis": covered["analysis"]})[:900])
+
+    def test_a_caller_shared_by_two_changed_symbols_counts_for_both(self) -> None:
+        marker = "SHARED_CALLER_COUNTED_ONCE"
+        # The walk deduplicates nodes, so a tally taken from its results would drop the
+        # second attribution; the count is per edge.
+        self.commit_and_sync({
+            "pair.py": "def left():\n    return 1\n\n\ndef right():\n    return 2\n",
+            "both.py": "from pair import left, right\n\n\ndef both():\n    return left() + right()\n",
+        })
+        (self.source / "pair.py").write_text("def left():\n    return 9\n\n\ndef right():\n    return 9\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        counts = self.incoming(payload, marker)
+        self.assertGreaterEqual(counts.get("left", 0), 1, marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertGreaterEqual(counts.get("right", 0), 1, marker + ": " + json.dumps(payload["changed_symbols"]))
+
+    def test_a_class_count_excludes_its_expanded_seeds(self) -> None:
+        marker = "CLASS_EXPANSION_INFLATED_THE_COUNT"
+        # A Class seed expands to its constructors and owning File; edges into those are not
+        # edges into the class, so the count must match the class's own incoming edges.
+        self.edit_compute()
+
+        payload = self.payload(self.detect_worktree(), marker)
+        followed = "'CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'METHOD_OVERRIDES', 'OVERRIDES', 'METHOD_IMPLEMENTS'"
+        raw = self.cypher_rows(
+            f"MATCH (a)-[r:CodeRelation]->(n) WHERE n.id = 'Class:svc.py:Service' AND r.type IN [{followed}] "
+            "RETURN a.id AS caller, r.type AS relType", marker)
+
+        self.assertEqual(self.incoming(payload, marker).get("Service"), len(raw),
+                         marker + ": class count must equal its own followed incoming edges\n" + "\n".join(raw))
+
+    def test_the_count_mixes_test_and_production_callers_exactly(self) -> None:
+        marker = "MIXED_CALLER_COUNT_NOT_EXACT"
+        # Two production callers and one test caller: the count is every followed edge, so it
+        # is exactly three, and only the test one reaches impacted_tests.
+        self.commit_and_sync({
+            "mix.py": "def mixed():\n    return 1\n",
+            "prod.py": ("from mix import mixed\n\n\ndef p_one():\n    return mixed()\n\n\n"
+                        "def p_two():\n    return mixed()\n"),
+            "tests/test_mix.py": "from mix import mixed\n\n\ndef test_mixed():\n    assert mixed() == 1\n",
+        })
+        (self.source / "mix.py").write_text("def mixed():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        self.assertEqual(self.incoming(payload, marker).get("mixed"), 3,
+                         marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual({item["name"] for item in payload["impacted_tests"]}, {"test_mixed"},
+                         marker + ": " + json.dumps(payload["impacted_tests"]))
+
+    def test_a_changed_test_caller_is_a_changed_symbol_not_an_impacted_test(self) -> None:
+        marker = "CHANGED_TEST_CALLER_MISREAD"
+        # Editing a function and its only test caller together: the test is a seed, so it is
+        # reported in changed_symbols and never in impacted_tests. A consumer must read the
+        # empty set against changed_symbols, which is what the tool description now says.
+        self.commit_and_sync({
+            "solo.py": "def solo():\n    return 1\n",
+            "tests/test_solo.py": "from solo import solo\n\n\ndef test_solo():\n    assert solo() == 1\n",
+        })
+        (self.source / "solo.py").write_text("def solo():\n    return 2\n", encoding="utf-8")
+        (self.source / "tests" / "test_solo.py").write_text(
+            "from solo import solo\n\n\ndef test_solo():\n    assert solo() == 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        counts = self.incoming(payload, marker)
+        self.assertGreaterEqual(counts.get("solo", 0), 1, marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual(payload["impacted_tests"], [],
+                         marker + ": a changed test is a seed, never a result: " + json.dumps(payload["impacted_tests"]))
+        self.assertIn("test_solo", self.names(payload),
+                      marker + ": the changed test must be visible in changed_symbols: " + json.dumps(payload["changed_symbols"]))
+
+    def test_a_cleared_change_set_still_carries_the_coverage_fields(self) -> None:
+        marker = "EMPTY_RESULT_LACKS_COVERAGE_FIELDS"
+        # One MCP session, an edit and then the edit cleared: the second answer must still
+        # carry the fields, with nothing uncovered because nothing changed.
+        self.edit_compute()
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+        first = client.call("detect_changes", {"repo": str(self.cache), "worktree": str(self.source)})
+        self.assertIsNotNone(first, marker + ": the MCP server gave no answer")
+        self.git(self.source, "checkout", "--", "svc.py")
+
+        second = client.call("detect_changes", {"repo": str(self.cache), "worktree": str(self.source)})
+
+        self.assertIsNotNone(second, marker + ": the MCP server gave no second answer")
+        self.assertEqual(second["changed_symbols"], [], marker + ": " + json.dumps(second)[:400])
+        self.assertEqual(second.get("impacted_tests"), [], marker + ": " + json.dumps(second)[:400])
+        self.assertEqual(second.get("analysis", {}).get("uncovered_symbols"), 0,
+                         marker + ": " + json.dumps(second.get("analysis")))
+
     def test_scope_with_worktree_is_refused(self) -> None:
         marker = "SCOPE_SILENTLY_IGNORED_WITH_WORKTREE"
         self.edit_compute()
@@ -1191,6 +1453,37 @@ class WorktreeDetectChangesTests(unittest.TestCase):
 
         self.assertIsNotNone(mcp, marker + ": the MCP server gave no answer")
         self.assertEqual(normalized(mcp), normalized(cli), marker)
+
+    def test_the_mcp_payload_carries_the_coverage_fields(self) -> None:
+        marker = "MCP_PAYLOAD_LACKS_NEW_FIELDS"
+        # Equality alone would pass with both sides missing the fields, so the MCP response
+        # is asserted directly before the payloads are compared.
+        self.edit_compute()
+        cli = self.payload(self.detect_worktree(), marker)
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+
+        mcp = client.call("detect_changes", {"repo": str(self.cache), "worktree": str(self.source)})
+
+        self.assertIsNotNone(mcp, marker + ": the MCP server gave no answer")
+        self.assertIn("uncovered_symbols", mcp.get("analysis", {}), marker + ": " + json.dumps(mcp.get("analysis")))
+        for symbol in mcp["changed_symbols"]:
+            self.assertIn("incoming_edges", symbol, marker + ": " + json.dumps(symbol))
+        by_name = {s["name"]: s["incoming_edges"] for s in mcp["changed_symbols"]}
+        self.assertGreaterEqual(by_name.get("compute", 0), 1, marker + ": " + json.dumps(mcp["changed_symbols"]))
+        self.assertEqual(normalized(mcp), normalized(cli), marker)
+
+    def test_the_impact_payload_carries_no_coverage_fields(self) -> None:
+        marker = "IMPACT_PAYLOAD_CHANGED_S3"
+        # The traversal is shared with impact, which must not gain the field at any level.
+        impact = self.cli("impact", "--uid", "Function:svc.py:Service.compute", "--include-tests", "-r", str(self.cache))
+
+        self.assertEqual(impact.returncode, 0, marker + ": " + impact.stdout + impact.stderr)
+        self.assertNotIn("incoming_edges", impact.stdout, marker + ": " + impact.stdout[:600])
+        by_depth = json.loads(impact.stdout).get("byDepth", {})
+        reached = {item["id"] for items in by_depth.values() for item in items}
+        self.assertIn("Function:tests/test_svc.py:test_compute", reached, marker + ": " + json.dumps(sorted(reached)))
+        self.assertIn("Function:svc.py:helper", reached, marker + ": " + json.dumps(sorted(reached)))
 
     def test_the_mcp_schema_advertises_the_worktree_input(self) -> None:
         marker = "MCP_SCHEMA_LACKS_WORKTREE"
@@ -1232,6 +1525,24 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         analysis = payload.get("analysis", {})
         self.assertEqual(analysis.get("status"), "partial", marker + ": " + json.dumps(analysis))
         self.assertIn("overlay.py", [gap["path"] for gap in analysis.get("gaps", [])], marker + ": " + json.dumps(analysis))
+
+    def test_every_seed_in_a_wide_change_set_carries_its_own_count(self) -> None:
+        marker = "WIDE_CHANGE_SET_LOSES_COUNTS"
+        # Forty changed symbols in one file: each is a seed of the single walk and each must
+        # come back with its own count. This does not measure cost — a wall-clock ratio would
+        # measure machine load, since per-call overhead dominates 38 extra seeds — so the
+        # promise that no query is added per symbol stays a recorded gap on the issue.
+        many = "".join(f"def wide_{index}():\n    return {index}\n\n\n" for index in range(40))
+        self.commit_and_sync({"wide.py": many})
+        (self.source / "wide.py").write_text(many.replace("    return ", "    return 100 + "), encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        counts = self.incoming(payload, marker)
+        self.assertEqual(len(payload["changed_symbols"]), 40, marker + ": " + json.dumps(payload["summary"]))
+        self.assertEqual(len(counts), 40, marker + ": every seed carries its own count")
+        self.assertEqual(payload["analysis"]["uncovered_symbols"], 40,
+                         marker + ": none of them has a caller: " + json.dumps(payload["analysis"]))
 
     def test_the_cli_completes_while_an_mcp_server_holds_the_index(self) -> None:
         marker = "CLI_STALLED_UNDER_MCP_LOCK"
