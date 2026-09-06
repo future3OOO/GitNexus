@@ -9,6 +9,7 @@
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { samePath } from './paths.js';
 
 export interface RepoMeta {
   repoPath: string;
@@ -254,11 +255,7 @@ export const registerRepo = async (repoPath: string, meta: RepoMeta): Promise<vo
   const { storagePath } = getStoragePaths(resolved);
 
   const entries = await readRegistry();
-  const existing = entries.findIndex((e) => {
-    const a = path.resolve(e.path);
-    const b = resolved;
-    return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
-  });
+  const existing = entries.findIndex((e) => samePath(e.path, resolved));
 
   const entry: RegistryEntry = {
     name,
@@ -283,9 +280,8 @@ export const registerRepo = async (repoPath: string, meta: RepoMeta): Promise<vo
  * Called after `gitnexus clean`.
  */
 export const unregisterRepo = async (repoPath: string): Promise<void> => {
-  const resolved = path.resolve(repoPath);
   const entries = await readRegistry();
-  const filtered = entries.filter((e) => path.resolve(e.path) !== resolved);
+  const filtered = entries.filter((e) => !samePath(e.path, repoPath));
   await writeRegistry(filtered);
 };
 
