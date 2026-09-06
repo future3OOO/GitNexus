@@ -20,11 +20,11 @@ import {
 export { isWriteQuery };
 // Embedding imports are lazy (dynamic import) to avoid loading onnxruntime-node
 // at MCP server startup — crashes on unsupported Node ABI versions (#89)
-// git utilities available if needed
-// import { isGitRepo, getCurrentCommit, getGitRoot } from '../../storage/git.js';
+import { writeWorkingTree } from '../../storage/git.js';
 import {
   listRegisteredRepos,
   cleanupOldKuzuFiles,
+  loadMeta,
   type RegistryEntry,
 } from '../../storage/repo-manager.js';
 import { samePath } from '../../storage/paths.js';
@@ -154,6 +154,31 @@ function logQueryError(context: string, err: unknown): void {
   const msg = err instanceof Error ? err.message : String(err);
   console.error(`GitNexus [${context}]: ${msg}`);
 }
+
+/** A graph row: named columns when the driver supplies them, positional otherwise. */
+type SymbolRow = { id?: string; name?: string; filePath?: string; [column: number]: string };
+
+/** One symbol reached by an impact traversal, with the edge and depth that reached it. */
+interface ImpactedNode {
+  depth: number;
+  id: string;
+  name: string;
+  type: string;
+  filePath: string;
+  relationType: string;
+  confidence: number;
+}
+
+/** Relation types an impact walk follows when the caller names none. */
+const DEFAULT_IMPACT_RELATION_TYPES = [
+  'CALLS',
+  'IMPORTS',
+  'EXTENDS',
+  'IMPLEMENTS',
+  'METHOD_OVERRIDES',
+  'OVERRIDES',
+  'METHOD_IMPLEMENTS',
+];
 
 export interface CodebaseContext {
   projectName: string;
@@ -1542,44 +1567,156 @@ export class LocalBackend {
 
   /**
    * Detect changes — git-diff based impact analysis.
-   * Maps changed lines to indexed symbols, then finds affected processes.
+   * Maps changed lines to indexed symbols, then finds affected processes and the tests
+   * upstream of the changed symbols. With `worktree`, the edited checkout's whole working
+   * tree is diffed against the tree the index was built from (recorded by analyze), so
+   * hunks land on the indexed lines even when the two checkouts share no Git directory.
    */
   private async detectChanges(
     repo: RepoHandle,
     params: {
       scope?: string;
       base_ref?: string;
+      worktree?: string;
     },
   ): Promise<any> {
     await this.ensureInitialized(repo.id);
 
-    const scope = params.scope || 'unstaged';
     const { execFileSync } = await import('child_process');
+    // A call the contract cannot honour is refused with its reason, never as an empty success.
+    const unavailable = (error: string) => ({
+      error,
+      analysis: { status: 'unavailable', reasons: [error], gaps: [] },
+    });
+    const firstLine = (err: unknown): string =>
+      String((err as { stderr?: string })?.stderr || (err instanceof Error ? err.message : err))
+        .split('\n')[0]
+        .trim();
+    const gitIn = (dir: string, args: string[], gitEnv?: NodeJS.ProcessEnv): string =>
+      execFileSync('git', args, {
+        cwd: dir,
+        encoding: 'utf-8',
+        env: gitEnv,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }).trim();
 
-    // Build git diff args based on scope (using execFileSync to avoid shell injection).
-    // --unified=0 keeps only the changed lines, so each hunk header maps onto symbol line ranges.
-    const diffFlags = ['--unified=0', '--no-color', '--no-ext-diff'];
+    // --unified=0 keeps only the changed lines, so each hunk header maps onto symbol line
+    // ranges; no rename detection, so a rename is a deletion plus an addition.
+    const diffFlags = ['--unified=0', '--no-color', '--no-ext-diff', '--no-renames'];
     let diffArgs: string[];
-    switch (scope) {
-      case 'staged':
-        diffArgs = ['diff', '--staged', ...diffFlags];
-        break;
-      case 'all':
-        diffArgs = ['diff', 'HEAD', ...diffFlags];
-        break;
-      case 'compare':
-        if (!params.base_ref) return { error: 'base_ref is required for "compare" scope' };
-        diffArgs = ['diff', params.base_ref, ...diffFlags];
-        break;
-      case 'unstaged':
-      default:
-        diffArgs = ['diff', ...diffFlags];
-        break;
+    let cwd = repo.repoPath;
+    let env: NodeJS.ProcessEnv | undefined;
+    let baseline: Record<string, unknown>;
+    if (params.worktree !== undefined) {
+      // The candidate is the edited checkout's working tree — staged, unstaged and untracked
+      // alike — and the baseline is fixed, so scope and base_ref have nothing to select.
+      if (params.scope !== undefined || params.base_ref !== undefined) {
+        return unavailable(
+          'scope and base_ref select a same-checkout baseline; with worktree the baseline is the indexed snapshot',
+        );
+      }
+      const worktree = path.resolve(params.worktree);
+      let toplevel: string;
+      try {
+        toplevel = path.resolve(gitIn(worktree, ['rev-parse', '--show-toplevel']));
+      } catch (err) {
+        return unavailable(`worktree ${worktree} is not inside a git work tree: ${firstLine(err)}`);
+      }
+      if (!samePath(toplevel, worktree)) {
+        return unavailable(`worktree ${worktree} is not a checkout root (the root is ${toplevel})`);
+      }
+      const meta = await loadMeta(repo.storagePath);
+      if (!meta) return unavailable(`index metadata is missing at ${repo.storagePath}; run gitnexus analyze`);
+      if (!meta.lastCommit) {
+        return unavailable(
+          'index metadata records no lastCommit (the indexed source commit); re-run gitnexus analyze on a git checkout',
+        );
+      }
+      if (!meta.indexedTree) {
+        return unavailable(
+          'index metadata records no indexedTree (the indexed snapshot); re-run gitnexus analyze with this version',
+        );
+      }
+      // Ancestry is the worktree's own history: the indexed source commit must be an ancestor of HEAD.
+      try {
+        gitIn(worktree, ['cat-file', '-e', `${meta.lastCommit}^{commit}`]);
+      } catch (err) {
+        return unavailable(
+          `indexed source commit ${meta.lastCommit} is unknown to worktree ${worktree}: ${firstLine(err)}`,
+        );
+      }
+      try {
+        gitIn(worktree, ['merge-base', '--is-ancestor', meta.lastCommit, 'HEAD']);
+      } catch (err) {
+        return unavailable(
+          `indexed source commit ${meta.lastCommit} is not an ancestor of the worktree HEAD (${firstLine(err) || 'divergent history'})`,
+        );
+      }
+      // The snapshot tree was written by analyze into the indexed repository's object store;
+      // the worktree reads it from there, so independent clones need no shared .git.
+      let objects: string;
+      try {
+        objects = path.resolve(repo.repoPath, gitIn(repo.repoPath, ['rev-parse', '--git-path', 'objects']));
+      } catch (err) {
+        return unavailable(`indexed repository ${repo.repoPath} has no git object store: ${firstLine(err)}`);
+      }
+      // Git splits this list on the path delimiter and reads C-style quoting, so a path
+      // holding a delimiter or a quote is quoted rather than silently split into two.
+      const quotedObjects = /["\\:;]/.test(objects)
+        ? `"${objects.replace(/([\\"])/g, '\\$1')}"`
+        : objects;
+      env = {
+        ...process.env,
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: [quotedObjects, process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]
+          .filter(Boolean)
+          .join(path.delimiter),
+      };
+      try {
+        gitIn(worktree, ['cat-file', '-e', `${meta.indexedTree}^{tree}`], env);
+      } catch {
+        return unavailable(
+          `indexed snapshot tree ${meta.indexedTree} is held by neither worktree ${worktree} nor the indexed repository ${repo.repoPath}`,
+        );
+      }
+      let candidateTree: string;
+      try {
+        candidateTree = writeWorkingTree(worktree);
+      } catch (err) {
+        return unavailable(`candidate tree capture failed in ${worktree}: ${firstLine(err)}`);
+      }
+      diffArgs = ['diff-tree', '-r', '-p', ...diffFlags, meta.indexedTree, candidateTree];
+      cwd = worktree;
+      baseline = {
+        kind: 'indexed-snapshot',
+        tree: meta.indexedTree,
+        source_commit: meta.lastCommit,
+        worktree,
+        candidate_tree: candidateTree,
+      };
+    } else {
+      const scope = params.scope || 'unstaged';
+      switch (scope) {
+        case 'staged':
+          diffArgs = ['diff', '--staged', ...diffFlags];
+          break;
+        case 'all':
+          diffArgs = ['diff', 'HEAD', ...diffFlags];
+          break;
+        case 'compare':
+          if (!params.base_ref) return unavailable('base_ref is required for "compare" scope');
+          diffArgs = ['diff', params.base_ref, ...diffFlags];
+          break;
+        case 'unstaged':
+        default:
+          diffArgs = ['diff', ...diffFlags];
+          break;
+      }
+      baseline = { kind: 'scope', scope, ...(scope === 'compare' ? { base_ref: params.base_ref } : {}) };
     }
 
     // Pin the header shape Git emits regardless of user configuration: raw (unquoted)
-    // non-ASCII paths, the standard a/ b/ prefixes, and no rename detection, so a rename
-    // is a deletion plus an addition and both halves of every header name one path.
+    // non-ASCII paths and the standard a/ b/ prefixes, so both halves of every header name
+    // one path.
     const gitArgs = [
       '-c', 'core.quotePath=false',
       '-c', 'diff.noprefix=false',
@@ -1587,7 +1724,6 @@ export class LocalBackend {
       '-c', 'diff.srcPrefix=a/',
       '-c', 'diff.dstPrefix=b/',
       ...diffArgs,
-      '--no-renames',
     ];
 
     // Each changed file with its hunks in old-side (pre-change) coordinates, which are
@@ -1597,7 +1733,8 @@ export class LocalBackend {
     const changedFiles = new Map<string, FileChange>();
     try {
       const output = execFileSync('git', gitArgs, {
-        cwd: repo.repoPath,
+        cwd,
+        env,
         encoding: 'utf-8',
         maxBuffer: 64 * 1024 * 1024,
       });
@@ -1631,8 +1768,37 @@ export class LocalBackend {
         }
       }
     } catch (err: any) {
-      return { error: `Git diff failed: ${err.message}` };
+      return unavailable(`Git diff failed: ${err.message}`);
     }
+
+    // Every changed path the graph cannot explain is a gap, and any gap or failed lookup
+    // makes the analysis partial: an empty result is complete only when nothing is missing.
+    // Untracked files are content a working-tree diff misses, so they are gaps for the
+    // scopes whose candidate is the working tree. The staged scope answers about the index,
+    // which cannot hold an untracked file, and the worktree candidate tree already holds
+    // them, where a new file surfaces as an Added change below.
+    const gaps: Array<{ path: string; reason: string }> = [];
+    const reasons: string[] = [];
+    if (params.worktree === undefined && params.scope !== 'staged') {
+      try {
+        const untracked = execFileSync(
+          'git',
+          ['ls-files', '--others', '--exclude-standard', '-z', '--', '.', ':(exclude).gitnexus'],
+          { cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 },
+        );
+        for (const file of untracked.split('\0')) {
+          if (file) gaps.push({ path: file.replace(/\\/g, '/'), reason: 'untracked: outside the git diff and not in the graph' });
+        }
+      } catch (err) {
+        reasons.push(`untracked file listing failed: ${firstLine(err)}`);
+      }
+    }
+    const analysis = () => ({
+      status: reasons.length > 0 || gaps.length > 0 ? 'partial' : 'complete',
+      baseline,
+      reasons,
+      gaps,
+    });
 
     if (changedFiles.size === 0) {
       return {
@@ -1644,6 +1810,8 @@ export class LocalBackend {
         },
         changed_symbols: [],
         affected_processes: [],
+        impacted_tests: [],
+        analysis: analysis(),
       };
     }
 
@@ -1665,10 +1833,13 @@ export class LocalBackend {
         `,
           { filePath: normalizedFile },
         );
+        let ranged = 0;
+        let touchedAny = false;
         for (const sym of symbols) {
           const startLine = sym.startLine ?? sym[4];
           const endLine = sym.endLine ?? sym[5];
           if (startLine == null || endLine == null) continue;
+          ranged++;
           const touched =
             change.whole !== null ||
             change.hunks.some(({ start, count }) =>
@@ -1677,16 +1848,35 @@ export class LocalBackend {
                 : startLine + 1 <= start + count - 1 && endLine + 1 >= start,
             );
           if (!touched) continue;
+          touchedAny = true;
+          const id = sym.id || sym[0];
           changedSymbols.push({
-            id: sym.id || sym[0],
+            id,
             name: sym.name || sym[1],
-            type: sym.type || sym[2],
+            // labels(n)[0] is empty on LadybugDB; the id carries its label prefix (generateId).
+            type: sym.type || sym[2] || String(id).split(':')[0],
             filePath: sym.filePath || sym[3],
             change_type: change.whole ?? 'Modified',
           });
         }
+        // A changed file the graph explains nothing of is a gap, whether it holds no indexed
+        // symbol at all or its changed lines fall outside every indexed range. Content
+        // appended past the last symbol is the second case, and reporting it keeps an
+        // unattributed change from reading as a complete result.
+        if (!touchedAny) {
+          gaps.push({
+            path: normalizedFile,
+            reason:
+              change.whole === 'Added'
+                ? 'added since the indexed snapshot: not in the graph'
+                : ranged === 0
+                  ? 'no indexed symbols: the graph cannot attribute this change'
+                  : 'changed lines fall outside every indexed symbol range',
+          });
+        }
       } catch (e) {
         logQueryError('detect-changes:file-symbols', e);
+        reasons.push(`symbol lookup failed for ${normalizedFile}: ${firstLine(e)}`);
       }
     }
 
@@ -1720,8 +1910,29 @@ export class LocalBackend {
         }
       } catch (e) {
         logQueryError('detect-changes:process-lookup', e);
+        reasons.push(`process lookup failed for ${sym.name}: ${firstLine(e)}`);
       }
     }
+
+    // Every test upstream of any changed symbol, containers included: one multi-seed walk
+    // reaches exactly the union of per-symbol `impact --direction upstream --include-tests`,
+    // and the changed symbols themselves are seeds, never results.
+    const { impacted, traversalComplete } = await this._traverseImpact(
+      repo,
+      changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
+      'upstream',
+      { maxDepth: 3, relationTypes: DEFAULT_IMPACT_RELATION_TYPES, includeTests: true, minConfidence: 0 },
+    );
+    if (!traversalComplete) reasons.push('upstream traversal failed part-way: impacted_tests may be incomplete');
+    const impactedTests = impacted
+      .filter((item) => isTestFilePath(item.filePath))
+      .map((item) => ({
+        id: item.id,
+        name: item.name,
+        type: item.type || String(item.id).split(':')[0],
+        filePath: item.filePath,
+      }))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
 
     const processCount = affectedProcesses.size;
     const risk =
@@ -1742,6 +1953,8 @@ export class LocalBackend {
       },
       changed_symbols: changedSymbols,
       affected_processes: Array.from(affectedProcesses.values()),
+      impacted_tests: impactedTests,
+      analysis: analysis(),
     };
   }
 
@@ -2015,27 +2228,11 @@ export class LocalBackend {
     const rawRelTypes =
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
-        : [
-            'CALLS',
-            'IMPORTS',
-            'EXTENDS',
-            'IMPLEMENTS',
-            'METHOD_OVERRIDES',
-            'OVERRIDES',
-            'METHOD_IMPLEMENTS',
-          ];
+        : DEFAULT_IMPACT_RELATION_TYPES;
     const relationTypes =
       rawRelTypes.length > 0
         ? rawRelTypes
-        : [
-            'CALLS',
-            'IMPORTS',
-            'EXTENDS',
-            'IMPLEMENTS',
-            'METHOD_OVERRIDES',
-            'OVERRIDES',
-            'METHOD_IMPLEMENTS',
-          ];
+        : DEFAULT_IMPACT_RELATION_TYPES;
     const includeTests = params.includeTests ?? false;
     const minConfidence = params.minConfidence ?? 0;
 
@@ -2111,16 +2308,53 @@ export class LocalBackend {
       minConfidence: number;
     },
   ): Promise<any> {
+    const symId = sym.id || sym[0];
+    const walk = await this._traverseImpact(
+      repo,
+      [{ id: symId, type: symType }],
+      direction,
+      opts,
+    );
+    const impacted = walk.impacted;
+    let traversalComplete = walk.traversalComplete;
+
+    const grouped: Record<number, ImpactedNode[]> = {};
+    for (const item of impacted) {
+      if (!grouped[item.depth]) grouped[item.depth] = [];
+      grouped[item.depth].push(item);
+    }
+    return this._enrichedImpact(repo, sym, symType, direction, impacted, grouped, traversalComplete);
+  }
+
+  /**
+   * Breadth-first walk over CodeRelation edges from one or more seed symbols, one query per
+   * depth. Seeds are visited from the start and never reported, so a multi-seed walk reaches
+   * exactly the union of the single-seed walks at the same depth.
+   */
+  private async _traverseImpact(
+    repo: RepoHandle,
+    seeds: Array<{ id: string; type: string }>,
+    direction: 'upstream' | 'downstream',
+    opts: {
+      maxDepth: number;
+      relationTypes: string[];
+      includeTests: boolean;
+      minConfidence: number;
+    },
+  ): Promise<{ impacted: ImpactedNode[]; traversalComplete: boolean }> {
     const { maxDepth, relationTypes, includeTests, minConfidence } = opts;
     const relTypeFilter = relationTypes.map((t) => `'${t}'`).join(', ');
     const confidenceFilter = minConfidence > 0 ? ` AND r.confidence >= ${minConfidence}` : '';
 
-    const symId = sym.id || sym[0];
-
-    const impacted: any[] = [];
-    const visited = new Set<string>([symId]);
-    let frontier = [symId];
+    const impacted: ImpactedNode[] = [];
+    const visited = new Set<string>();
+    let frontier: string[] = [];
     let traversalComplete = true;
+    for (const seed of seeds) {
+      if (!seed.id || visited.has(seed.id)) continue;
+      visited.add(seed.id);
+      frontier.push(seed.id);
+    }
 
     // Fix #480: For Java (and other JVM) Class/Interface nodes, CALLS edges
     // point to Constructor nodes and IMPORTS edges point to File nodes — not
@@ -2129,7 +2363,9 @@ export class LocalBackend {
     // The owning File is kept only as an internal seed (frontier/visited) and
     // is NOT added to impacted — it is the definition container, not an
     // upstream dependent. The BFS will discover IMPORTS edges on it naturally.
-    if (symType === 'Class' || symType === 'Interface') {
+    for (const seed of seeds) {
+      if (seed.type !== 'Class' && seed.type !== 'Interface') continue;
+      const symId = seed.id;
       try {
         // Run both seed queries in parallel — they are independent.
         const [ctorRows, fileRows] = await Promise.all([
@@ -2177,12 +2413,15 @@ export class LocalBackend {
     for (let depth = 1; depth <= maxDepth && frontier.length > 0; depth++) {
       const nextFrontier: string[] = [];
 
-      // Batch frontier nodes into a single Cypher query per depth level
+      // One query per depth over the whole frontier, seed by seed. UNWIND matches each
+      // frontier id separately: an `n.id IN [...]` list makes the engine choose one plan for
+      // the whole list and lose edge types it holds for only some ids — measured on a class
+      // and its owning File, where the class's CALLS edges vanished from the batched result.
       const idList = frontier.map((id) => `'${id.replace(/'/g, "''")}'`).join(', ');
       const query =
         direction === 'upstream'
-          ? `MATCH (caller)-[r:CodeRelation]->(n) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, caller.id AS id, caller.name AS name, labels(caller)[0] AS type, caller.filePath AS filePath, r.type AS relType, r.confidence AS confidence`
-          : `MATCH (n)-[r:CodeRelation]->(callee) WHERE n.id IN [${idList}] AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, callee.id AS id, callee.name AS name, labels(callee)[0] AS type, callee.filePath AS filePath, r.type AS relType, r.confidence AS confidence`;
+          ? `UNWIND [${idList}] AS seedId MATCH (caller)-[r:CodeRelation]->(n) WHERE n.id = seedId AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, caller.id AS id, caller.name AS name, labels(caller)[0] AS type, caller.filePath AS filePath, r.type AS relType, r.confidence AS confidence`
+          : `UNWIND [${idList}] AS seedId MATCH (n)-[r:CodeRelation]->(callee) WHERE n.id = seedId AND r.type IN [${relTypeFilter}]${confidenceFilter} RETURN n.id AS sourceId, callee.id AS id, callee.name AS name, labels(callee)[0] AS type, callee.filePath AS filePath, r.type AS relType, r.confidence AS confidence`;
 
       try {
         const related = await executeQuery(repo.id, query);
@@ -2226,11 +2465,21 @@ export class LocalBackend {
       frontier = nextFrontier;
     }
 
-    const grouped: Record<number, any[]> = {};
-    for (const item of impacted) {
-      if (!grouped[item.depth]) grouped[item.depth] = [];
-      grouped[item.depth].push(item);
-    }
+    return { impacted, traversalComplete };
+  }
+
+  /** Process, module and risk enrichment of a traversal, in the impact payload shape. */
+  private async _enrichedImpact(
+    repo: RepoHandle,
+    sym: SymbolRow,
+    symType: string,
+    direction: 'upstream' | 'downstream',
+    impacted: ImpactedNode[],
+    grouped: Record<number, ImpactedNode[]>,
+    walked: boolean,
+  ): Promise<Record<string, unknown>> {
+    const symId = sym.id || sym[0];
+    let traversalComplete = walked;
 
     // ── Enrichment: affected processes, modules, risk ──────────────
     const directCount = (grouped[1] || []).length;
@@ -2563,27 +2812,11 @@ export class LocalBackend {
     const rawRelTypes =
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
-        : [
-            'CALLS',
-            'IMPORTS',
-            'EXTENDS',
-            'IMPLEMENTS',
-            'METHOD_OVERRIDES',
-            'OVERRIDES',
-            'METHOD_IMPLEMENTS',
-          ];
+        : DEFAULT_IMPACT_RELATION_TYPES;
     const relationTypes =
       rawRelTypes.length > 0
         ? rawRelTypes
-        : [
-            'CALLS',
-            'IMPORTS',
-            'EXTENDS',
-            'IMPLEMENTS',
-            'METHOD_OVERRIDES',
-            'OVERRIDES',
-            'METHOD_IMPLEMENTS',
-          ];
+        : DEFAULT_IMPACT_RELATION_TYPES;
 
     try {
       return await this._runImpactBFS(repo, resolved.sym, resolved.symType, dir, {

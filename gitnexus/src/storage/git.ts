@@ -1,5 +1,6 @@
-import { execSync } from 'child_process';
-import { statSync } from 'fs';
+import { execFileSync, execSync } from 'child_process';
+import { mkdtempSync, rmSync, statSync } from 'fs';
+import { tmpdir } from 'os';
 import path from 'path';
 
 // Git utilities for repository detection, commit tracking, and diff analysis
@@ -18,6 +19,43 @@ export const getCurrentCommit = (repoPath: string): string => {
     return execSync('git rev-parse HEAD', { cwd: repoPath }).toString().trim();
   } catch {
     return '';
+  }
+};
+
+/**
+ * The tree id of a checkout's working tree — tracked and untracked files, with ignored
+ * files and the `.gitnexus/` index directory excluded — written into its object store
+ * through a throwaway index, so the checkout's own index and staging state are untouched.
+ * Throws when git cannot capture it.
+ */
+export const writeWorkingTree = (repoPath: string): string => {
+  const scratch = mkdtempSync(path.join(tmpdir(), 'gitnexus-tree-'));
+  const env = { ...process.env, GIT_INDEX_FILE: path.join(scratch, 'index') };
+  const git = (...args: string[]): string =>
+    execFileSync('git', args, {
+      cwd: repoPath,
+      env,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  try {
+    let hasHead = true;
+    try {
+      execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: repoPath, stdio: 'ignore' });
+    } catch {
+      hasHead = false;
+    }
+    git('read-tree', hasHead ? 'HEAD' : '--empty');
+    // The checkout's own ignore rules decide what is content, including the user's global
+    // excludes file, so nothing they ignore is captured. The index directory is dropped
+    // afterwards rather than through a pathspec or a replacement excludes file: `git add`
+    // refuses a pathspec naming an already-ignored path, and overriding core.excludesFile
+    // would capture whatever the user ignores only there.
+    git('add', '-A', '--', '.');
+    git('rm', '--cached', '-r', '-q', '--ignore-unmatch', '--', '.gitnexus');
+    return git('write-tree');
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 };
 

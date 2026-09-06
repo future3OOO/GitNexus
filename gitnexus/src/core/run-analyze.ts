@@ -30,7 +30,7 @@ import {
   registerRepo,
   cleanupOldKuzuFiles,
 } from '../storage/repo-manager.js';
-import { getCurrentCommit, hasGitDir } from '../storage/git.js';
+import { getCurrentCommit, hasGitDir, writeWorkingTree } from '../storage/git.js';
 import { generateAIContextFiles } from '../cli/ai-context.js';
 
 // ---------------------------------------------------------------------------
@@ -131,6 +131,17 @@ export async function runFullAnalysis(
         stats: existingMeta.stats ?? {},
         alreadyUpToDate: true,
       };
+    }
+  }
+
+  // The tree the graph is built from, recorded so detect-changes can diff another
+  // checkout against exactly these lines. Captured before the pipeline reads the files.
+  let indexedTree: string | undefined;
+  if (repoHasGit) {
+    try {
+      indexedTree = writeWorkingTree(repoPath);
+    } catch (err) {
+      log(`Snapshot tree not recorded: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -282,6 +293,7 @@ export async function runFullAnalysis(
     const meta = {
       repoPath,
       lastCommit: currentCommit,
+      ...(indexedTree ? { indexedTree } : {}),
       indexedAt: new Date().toISOString(),
       stats: {
         files: pipelineResult.totalFileCount,

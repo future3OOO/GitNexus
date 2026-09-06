@@ -143,14 +143,19 @@ program
 
 program
   .command('detect-changes')
-  .description('Map uncommitted git changes to indexed symbols and affected execution flows')
-  .option('-r, --repo <name>', 'Target repository')
+  .description(
+    'Map git changes to indexed symbols, affected execution flows and the tests upstream of them',
+  )
+  .option('-r, --repo <name>', 'Target repository (the indexed checkout)')
   .addOption(
-    new Option('-s, --scope <scope>', 'which changes to map')
-      .choices(['unstaged', 'staged', 'all', 'compare'])
-      .default('unstaged'),
+    new Option('-s, --scope <scope>', 'which changes to map (default: unstaged; not with --worktree)')
+      .choices(['unstaged', 'staged', 'all', 'compare']),
   )
   .option('--base-ref <ref>', 'Branch/commit for the compare scope')
+  .option(
+    '--worktree <path>',
+    'Edited checkout root whose whole working tree (staged, unstaged, untracked) is diffed against the indexed snapshot',
+  )
   .action(createLazyAction(() => import('./tool.js'), 'detectChangesCommand'));
 
 // ─── Eval Server (persistent daemon for SWE-bench) ─────────────────

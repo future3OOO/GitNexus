@@ -155,10 +155,12 @@ export async function detectChangesCommand(options?: {
   repo?: string;
   scope?: string;
   baseRef?: string;
+  worktree?: string;
 }): Promise<void> {
   await call('detect_changes', {
-    scope: options?.scope || 'unstaged',
+    scope: options?.scope,
     base_ref: options?.baseRef,
+    worktree: options?.worktree,
     repo: options?.repo,
   });
 }

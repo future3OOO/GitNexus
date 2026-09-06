@@ -14,6 +14,8 @@ import { samePath } from './paths.js';
 export interface RepoMeta {
   repoPath: string;
   lastCommit: string;
+  /** Tree id of the working tree the graph was built from (absent on non-git folders). */
+  indexedTree?: string;
   indexedAt: string;
   stats?: {
     files?: number;
