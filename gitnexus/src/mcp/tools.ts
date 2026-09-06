@@ -95,6 +95,7 @@ Hybrid ranking: BM25 keyword + semantic vector search, ranked by Reciprocal Rank
 
 WHEN TO USE: Complex structural queries that search/explore can't answer. READ gitnexus://repo/{name}/schema first for the full schema.
 AFTER THIS: Use context() on result symbols for deeper context.
+AVOID: a variable-length path (*1..n) with ALL or ANY over relationships(p); it crashes the engine. Use impact for reachability and blast radius.
 
 SCHEMA:
 - Nodes: File, Folder, Function, Class, Interface, Method, CodeElement, Community, Process, Route, Tool

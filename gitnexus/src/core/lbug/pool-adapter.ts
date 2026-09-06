@@ -646,7 +646,9 @@ export const executeQueryIsolated = async (repoId: string, cypher: string): Prom
       }
       reject(
         new Error(
-          `Query crashed the graph engine (${signal ?? `exit code ${code}`}); the server is still up.`,
+          `Query crashed the graph engine (${signal ?? `exit code ${code}`}); the server is still up. ` +
+            'One known trigger for this crash is a variable-length path with an ALL or ANY predicate over ' +
+            'relationships(p); if your query has that shape, do not retry variants of it, use the impact tool for that traversal.',
         ),
       );
     });
