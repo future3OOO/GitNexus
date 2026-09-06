@@ -18,8 +18,9 @@ from gitnexus.test.e2e.test_analyze_skill_generation import ENV, PACKAGE, SOURCE
 
 FIXTURE = PACKAGE / "test" / "fixtures" / "lang-resolution" / "kotlin-overload-dispatch"
 GRAMMAR = PACKAGE / "node_modules" / "tree-sitter-kotlin"
-ARCH = {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine()]
-PREBUILD = GRAMMAR / "prebuilds" / f"{ {'Linux': 'linux', 'Darwin': 'darwin', 'Windows': 'win32'}[platform.system()] }-{ARCH}"
+ARCH = {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(platform.machine())
+OS = {"Linux": "linux", "Darwin": "darwin", "Windows": "win32"}.get(platform.system())
+PREBUILD = GRAMMAR / "prebuilds" / f"{OS}-{ARCH}"
 
 
 class AnalyzeKotlinGrammarTests(unittest.TestCase):
@@ -33,6 +34,7 @@ class AnalyzeKotlinGrammarTests(unittest.TestCase):
         return subprocess.run([*SOURCE_ENTRY, *args], cwd=PACKAGE, text=True, capture_output=True,
                               env={**ENV, "HOME": str(self.home)}, timeout=600)
 
+    @unittest.skipUnless(OS and ARCH, "the grammar ships no prebuild for this platform")
     def test_analyze_indexes_kotlin_classes_from_the_prebuilt_grammar(self) -> None:
         marker = "KOTLIN_NOT_INDEXED"
         self.assertFalse((GRAMMAR / "build").exists(), f"{marker}: a compiled build/ would shadow the prebuild")
