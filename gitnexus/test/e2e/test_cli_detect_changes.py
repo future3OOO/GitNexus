@@ -1236,6 +1236,54 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertEqual(payload["analysis"].get("uncovered_symbols"), 0,
                          marker + ": a symbol with a caller is not uncovered: " + json.dumps(payload["analysis"]))
 
+    def test_an_incomplete_walk_publishes_null_rather_than_zero(self) -> None:
+        marker = "UNMEASURED_COVERAGE_PUBLISHED_AS_ZERO"
+        # A name holding an apostrophe breaks the depth-1 query's own escaping, so the walk
+        # fails while the symbol lookup succeeds. Zero already means "no caller is known", so
+        # publishing it for a symbol nobody measured states a fact that was never checked.
+        self.commit_and_sync({"o'ne.py": "def apostrophe():\n    return 1\n"})
+        (self.source / "o'ne.py").write_text("def apostrophe():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        analysis = payload["analysis"]
+        self.assertEqual(analysis["status"], "partial", marker + ": " + json.dumps(analysis))
+        self.assertIsNone(analysis["uncovered_symbols"],
+                          marker + ": an unmeasured count is not zero: " + json.dumps(analysis))
+        for symbol in payload["changed_symbols"]:
+            self.assertIsNone(symbol["incoming_edges"],
+                              marker + ": an unmeasured count is not zero: " + json.dumps(symbol))
+        self.assertTrue(any("incoming_edges" in reason for reason in analysis["reasons"]),
+                        marker + ": the reason must name the fields: " + json.dumps(analysis))
+
+    def test_the_reading_rule_matches_a_path_rule_blind_spot(self) -> None:
+        marker = "DESCRIPTION_PROMISES_A_FALSE_INFERENCE"
+        # isTestFilePath classifies by path, so a root-level test_ file is not a test to this
+        # tool. Its call still counts, impacted_tests stays empty and the file is unchanged,
+        # so a description promising the test caller is in changed_symbols would be false.
+        self.commit_and_sync({
+            "engine.py": "def engine():\n    return 1\n",
+            "test_svc.py": "from engine import engine\n\n\ndef test_engine():\n    assert engine() == 1\n",
+        })
+        (self.source / "engine.py").write_text("def engine():\n    return 2\n", encoding="utf-8")
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+
+        payload = self.payload(self.detect_worktree(), marker)
+        listed = client.request("tools/list", {})
+
+        self.assertGreaterEqual(self.incoming(payload, marker).get("engine", 0), 1,
+                                marker + ": " + json.dumps(payload["changed_symbols"]))
+        self.assertEqual(payload["impacted_tests"], [], marker + ": " + json.dumps(payload["impacted_tests"]))
+        self.assertNotIn("test_engine", self.names(payload),
+                         marker + ": the caller is unchanged, so it is not a changed symbol either")
+        self.assertIsNotNone(listed, marker + ": the MCP server gave no tool list")
+        (tool,) = [t for t in listed["result"]["tools"] if t["name"] == "detect_changes"]
+        self.assertNotIn("are themselves in changed_symbols", tool["description"],
+                         marker + ": that inference is false for a caller the path rule does not classify")
+        self.assertIn("not classified as a test by the path rule", tool["description"],
+                      marker + ": " + tool["description"][-400:])
+
     def test_a_symbol_with_no_callers_is_counted_as_uncovered(self) -> None:
         marker = "UNCOVERED_SYMBOL_NOT_COUNTED"
         self.commit_and_sync({"orphan.py": "def orphan():\n    return 1\n"})

@@ -190,7 +190,8 @@ WHEN TO USE: Before committing — to understand what your changes affect. Pre-c
 AFTER THIS: Review affected processes. Use context() on high-risk symbols. READ gitnexus://repo/{name}/process/{name} for full traces.
 
 Returns: changed symbols, affected processes, impacted_tests, a risk summary, and analysis {status: complete|partial|unavailable, uncovered_symbols, reasons, gaps} — a gap names a changed path the graph cannot attribute.
-Each changed symbol carries incoming_edges, how many callers the graph knows for it, and analysis.uncovered_symbols counts those with none. An empty impacted_tests beside incoming_edges 0 means no caller is known at all; beside a non-zero count it means the known callers that are tests, if any, are themselves in changed_symbols — a changed symbol is a seed of the walk and never one of its results.`,
+Each changed symbol carries incoming_edges, how many callers the graph knows for it, and analysis.uncovered_symbols counts those with none. Both are null when the walk did not finish, because zero is a measurement and an unfinished walk made none; analysis.status is partial there and its reason names the fields.
+An empty impacted_tests beside incoming_edges 0 means no caller is known at all. Beside a non-zero count it means every known caller is either not classified as a test by the path rule, or is itself a changed symbol — a changed symbol is a seed of the walk and never one of its results. It does not mean no test calls the symbol: a test file the path rule does not recognise counts here and is absent from impacted_tests.`,
     inputSchema: {
       type: 'object',
       properties: {
