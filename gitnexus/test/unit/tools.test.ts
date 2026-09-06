@@ -72,10 +72,7 @@ describe('GITNEXUS_TOOLS', () => {
   it('impact tool requires direction and either target or UID', () => {
     const impactTool = GITNEXUS_TOOLS.find((t) => t.name === 'impact')!;
     expect(impactTool.inputSchema.required).toContain('direction');
-    expect(impactTool.inputSchema.anyOf).toEqual([
-      { required: ['target'] },
-      { required: ['uid'] },
-    ]);
+    expect(impactTool.inputSchema.anyOf).toEqual([{ required: ['target'] }, { required: ['uid'] }]);
   });
 
   it('rename tool requires new_name', () => {
