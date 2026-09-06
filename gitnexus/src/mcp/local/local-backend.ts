@@ -284,7 +284,7 @@ export class LocalBackend {
     const base = name.toLowerCase();
     // Check for name collision with a different path
     for (const [id, handle] of this.repos) {
-      if (id === base && handle.repoPath !== path.resolve(repoPath)) {
+      if (id === base && path.resolve(handle.repoPath) !== path.resolve(repoPath)) {
         // Collision — use path hash
         const hash = Buffer.from(repoPath).toString('base64url').slice(0, 6);
         return `${base}-${hash}`;
