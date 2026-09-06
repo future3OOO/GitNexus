@@ -1611,6 +1611,11 @@ export class LocalBackend {
           current = { whole: null, hunks: [] };
           changedFiles.set(rest.slice(0, (rest.length - ' b/'.length) / 2), current);
           inHeader = true;
+        } else if (line.startsWith('diff --git ')) {
+          // Git still quotes a path holding a double quote, backslash, or control
+          // character; that file is not mapped and must not feed the previous one.
+          current = null;
+          inHeader = false;
         } else if (!current) {
           continue;
         } else if (inHeader && line.startsWith('new file mode')) {

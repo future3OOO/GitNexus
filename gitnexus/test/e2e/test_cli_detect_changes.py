@@ -185,6 +185,59 @@ class DetectChangesCliTests(unittest.TestCase):
 
         self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
 
+    def test_a_quoted_header_does_not_attach_its_hunks_to_the_previous_file(self) -> None:
+        marker = "QUOTED_HEADER_HUNKS_MISATTRIBUTED"
+        quoted = 'q"uote.py'
+        self.commit_and_analyze(quoted, "def one():\n    return 1\n\n\ndef two():\n    return 2\n")
+        (self.repo / "app.py").write_text(EDITED, encoding="utf-8")
+        (self.repo / quoted).write_text("def one():\n    return 1\n\n\ndef two():\n    return 3\n", encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_prefixless_diff_configuration_still_maps_hunks(self) -> None:
+        marker = "PREFIX_CONFIGURATION_BROKE_HEADERS"
+        self.git("config", "diff.noprefix", "true")
+        self.git("config", "diff.mnemonicPrefix", "true")
+        (self.repo / "app.py").write_text(EDITED, encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_staged_rename_reports_the_old_file_symbols_as_deleted(self) -> None:
+        marker = "RENAME_HID_THE_DELETION"
+        self.git("mv", "lib.py", "lib2.py")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        changed = {(s["filePath"], s["name"]): s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(changed.get(("lib.py", "helper")), "Deleted", marker + ": " + json.dumps(payload)[:600])
+
+    def test_an_indexed_new_file_reports_its_symbols_as_added(self) -> None:
+        marker = "NEW_FILE_NOT_CLASSIFIED_ADDED"
+        (self.repo / "fresh.py").write_text("def fresh():\n    return 1\n", encoding="utf-8")
+        self.git("add", "fresh.py")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        changed = {s["name"]: s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(changed.get("fresh"), "Added", marker + ": " + json.dumps(payload)[:600])
+
+    def test_deleting_the_only_separator_line_reports_no_symbol(self) -> None:
+        marker = "ZERO_COUNT_DELETION_WIDENED"
+        content = "def value():\n    return 1\n\ndef other():\n    return value() + 1\n"
+        self.commit_and_analyze("tight.py", content)
+        (self.repo / "tight.py").write_text(content.replace("\n\ndef other", "\ndef other"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        tight = [s["name"] for s in payload["changed_symbols"] if s["filePath"] == "tight.py"]
+        self.assertEqual(tight, [], marker + ": " + json.dumps(payload)[:600])
+
     def test_an_unknown_repo_is_refused_as_json(self) -> None:
         self.assert_refused_as_json(self.cli("detect-changes", "-r", str(self.tmp / "nowhere")),
                                     "DETECT_CHANGES_BAD_REPO_NOT_REFUSED")
