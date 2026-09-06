@@ -352,10 +352,9 @@ export class LocalBackend {
       for (const handle of this.repos.values()) {
         if (handle.name.toLowerCase() === paramLower) return handle;
       }
-      // Match by path (substring)
-      const resolved = path.resolve(repoParam);
+      // Match by path
       for (const handle of this.repos.values()) {
-        if (handle.repoPath === resolved) return handle;
+        if (samePath(handle.repoPath, repoParam)) return handle;
       }
       // Match by partial name
       for (const handle of this.repos.values()) {

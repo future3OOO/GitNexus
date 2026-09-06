@@ -280,9 +280,8 @@ export const registerRepo = async (repoPath: string, meta: RepoMeta): Promise<vo
  * Called after `gitnexus clean`.
  */
 export const unregisterRepo = async (repoPath: string): Promise<void> => {
-  const resolved = path.resolve(repoPath);
   const entries = await readRegistry();
-  const filtered = entries.filter((e) => path.resolve(e.path) !== resolved);
+  const filtered = entries.filter((e) => !samePath(e.path, repoPath));
   await writeRegistry(filtered);
 };
 
