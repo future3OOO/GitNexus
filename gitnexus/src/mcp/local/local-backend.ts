@@ -1837,9 +1837,11 @@ export class LocalBackend {
         reasons.push(`untracked file listing failed: ${firstLine(err)}`);
       }
     }
+    let uncoveredSymbols = 0;
     const analysis = () => ({
       status: reasons.length > 0 || gaps.length > 0 ? 'partial' : 'complete',
       baseline,
+      uncovered_symbols: uncoveredSymbols,
       reasons,
       gaps,
     });
@@ -1961,13 +1963,20 @@ export class LocalBackend {
     // Every test upstream of any changed symbol, containers included: one multi-seed walk
     // reaches exactly the union of per-symbol `impact --direction upstream --include-tests`,
     // and the changed symbols themselves are seeds, never results.
-    const { impacted, traversalComplete } = await this._traverseImpact(
+    const { impacted, traversalComplete, edgesIntoSeed } = await this._traverseImpact(
       repo,
       changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
       'upstream',
       { maxDepth: 3, relationTypes: DEFAULT_IMPACT_RELATION_TYPES, includeTests: true, minConfidence: 0 },
     );
     if (!traversalComplete) reasons.push('upstream traversal failed part-way: impacted_tests may be incomplete');
+    // How many callers the graph knows for each changed symbol, so an empty impacted_tests
+    // set is readable: zero here means no caller is known at all, while a non-zero count
+    // means callers are known and none of them is a test.
+    for (const sym of changedSymbols) {
+      sym.incoming_edges = edgesIntoSeed.get(String(sym.id)) ?? 0;
+      if (sym.incoming_edges === 0) uncoveredSymbols += 1;
+    }
     const impactedTests = impacted
       .filter((item) => isTestFilePath(item.filePath))
       .map((item) => ({
@@ -2385,11 +2394,15 @@ export class LocalBackend {
       includeTests: boolean;
       minConfidence: number;
     },
-  ): Promise<{ impacted: ImpactedNode[]; traversalComplete: boolean }> {
+  ): Promise<{ impacted: ImpactedNode[]; traversalComplete: boolean; edgesIntoSeed: Map<string, number> }> {
     const { maxDepth, relationTypes, includeTests, minConfidence } = opts;
     const relTypeFilter = relationTypes.map((t) => `'${t}'`).join(', ');
     const confidenceFilter = minConfidence > 0 ? ` AND r.confidence >= ${minConfidence}` : '';
 
+    // Edges of the followed kinds arriving at each original seed, tallied from the first
+    // depth's rows before anything is filtered or deduplicated: `impacted` keeps one entry
+    // per node, so a caller shared by two seeds would otherwise be attributed to only one.
+    const edgesIntoSeed = new Map<string, number>();
     const impacted: ImpactedNode[] = [];
     const visited = new Set<string>();
     let frontier: string[] = [];
@@ -2474,6 +2487,13 @@ export class LocalBackend {
           const relId = rel.id || rel[1];
           const filePath = rel.filePath || rel[4] || '';
 
+          if (depth === 1) {
+            // Keyed on the row's own target, so a Class's expanded constructor and owning
+            // File seeds are tallied against themselves rather than against the class.
+            const into = String(rel.sourceId ?? rel[0] ?? '');
+            if (into) edgesIntoSeed.set(into, (edgesIntoSeed.get(into) ?? 0) + 1);
+          }
+
           if (!includeTests && isTestFilePath(filePath)) continue;
 
           if (!visited.has(relId)) {
@@ -2509,7 +2529,7 @@ export class LocalBackend {
       frontier = nextFrontier;
     }
 
-    return { impacted, traversalComplete };
+    return { impacted, traversalComplete, edgesIntoSeed };
   }
 
   /** Process, module and risk enrichment of a traversal, in the impact payload shape. */
