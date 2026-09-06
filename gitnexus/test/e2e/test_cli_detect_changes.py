@@ -1061,8 +1061,7 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertEqual(self.names(payload), {"Service", "compute"}, marker + ": the ordinary edit must still be attributed: " + json.dumps(payload)[:600])
         self.assertEqual(analysis.get("status"), "partial", marker + ": " + json.dumps(analysis))
         paths = [gap["path"] for gap in analysis.get("gaps", [])]
-        self.assertIn(quoted, paths,
-                      "QUOTED_GAP_PATH_IS_A_RAW_HEADER: the gap must name the file itself: " + json.dumps(analysis))
+        self.assertIn(quoted, paths, marker + ": the gap must name the file itself: " + json.dumps(analysis))
 
     def test_the_worktree_capture_does_not_copy_an_unignored_index_database(self) -> None:
         marker = "INDEX_DATABASE_COPIED_INTO_OBJECT_STORE"
@@ -1118,6 +1117,19 @@ class WorktreeDetectChangesTests(unittest.TestCase):
 
         paths = [gap["path"] for gap in payload["analysis"].get("gaps", [])]
         self.assertIn(tabbed, paths, marker + ": " + json.dumps(payload["analysis"]))
+
+    def test_an_astral_character_survives_the_quoted_gap_path(self) -> None:
+        marker = "ASTRAL_QUOTED_GAP_PATH_CORRUPTED"
+        # With core.quotePath=false git emits non-ASCII literally but still quotes a name
+        # holding a control character, so the decoder meets a whole astral character.
+        astral = "ta\tb\U0001f600.py"
+        self.commit_and_sync({astral: "def one():\n    return 1\n"})
+        (self.source / astral).write_text("def one():\n    return 2\n", encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        paths = [gap["path"] for gap in payload["analysis"].get("gaps", [])]
+        self.assertIn(astral, paths, marker + ": " + json.dumps(payload["analysis"]))
 
     def test_the_capture_does_not_copy_an_unignored_index_database(self) -> None:
         marker = "INDEX_DATABASE_COPIED_INTO_OBJECT_STORE"
