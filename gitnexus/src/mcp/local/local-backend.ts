@@ -2466,22 +2466,30 @@ export class LocalBackend {
     try {
       await this.refreshRepos();
       await this.ensureInitialized(repoId);
-    } catch {
+    } catch (e) {
+      console.error('[DEBUG-w1n] impactByUid init failed', repoId, String(e));
       return null;
     }
 
     const repo = this.repos.get(repoId);
-    if (!repo) return null;
+    if (!repo) {
+      console.error('[DEBUG-w1n] impactByUid repo missing', repoId, [...this.repos.keys()]);
+      return null;
+    }
 
     const dir: 'upstream' | 'downstream' = direction === 'downstream' ? 'downstream' : 'upstream';
 
     let resolved: { sym: any; symType: string } | null;
     try {
       resolved = await this._resolveImpactSymbol(repoId, 'id', uid);
-    } catch {
+    } catch (e) {
+      console.error('[DEBUG-w1n] impactByUid resolve threw', uid, String(e));
       return null;
     }
-    if (!resolved) return null;
+    if (!resolved) {
+      console.error('[DEBUG-w1n] impactByUid unresolved', uid);
+      return null;
+    }
 
     // Map legacy relation type names (backward compat for OVERRIDES → METHOD_OVERRIDES)
     const mappedRelTypes = opts.relationTypes?.flatMap((t: string) =>
@@ -2519,7 +2527,8 @@ export class LocalBackend {
         includeTests: opts.includeTests,
         minConfidence: opts.minConfidence,
       });
-    } catch {
+    } catch (e) {
+      console.error('[DEBUG-w1n] impactByUid BFS threw', uid, String(e), (e as Error)?.stack);
       return null;
     }
   }
