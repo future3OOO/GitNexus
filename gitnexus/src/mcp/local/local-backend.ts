@@ -2516,6 +2516,10 @@ export class LocalBackend {
         }
       } catch (e) {
         logQueryError('impact:class-node-expansion', e);
+        // The seeds this class needed are missing, so its callers cannot be read. Saying so
+        // is what keeps a later zero count from being published as "this symbol has none",
+        // and it matches what the depth traversal below already does on its own failure.
+        traversalComplete = false;
       }
     }
 
