@@ -1577,31 +1577,51 @@ export class LocalBackend {
         break;
     }
 
-    // Each changed file with its hunks as 1-based new-file line ranges; an added or
-    // deleted file is a whole-file change and carries that as its change_type.
-    type FileChange = { whole: 'Added' | 'Deleted' | null; ranges: Array<[number, number]> };
+    // Pin the header shape Git emits regardless of user configuration: raw (unquoted)
+    // non-ASCII paths, the standard a/ b/ prefixes, and no rename detection, so a rename
+    // is a deletion plus an addition and both halves of every header name one path.
+    const gitArgs = [
+      '-c', 'core.quotePath=false',
+      '-c', 'diff.noprefix=false',
+      '-c', 'diff.mnemonicPrefix=false',
+      '-c', 'diff.srcPrefix=a/',
+      '-c', 'diff.dstPrefix=b/',
+      ...diffArgs,
+      '--no-renames',
+    ];
+
+    // Each changed file with its hunks in old-side (pre-change) coordinates, which are
+    // the lines the index was built from. An added or deleted file is classified from
+    // Git's header lines and is a whole-file change carrying that as its change_type.
+    type FileChange = { whole: 'Added' | 'Deleted' | null; hunks: Array<{ start: number; count: number }> };
     const changedFiles = new Map<string, FileChange>();
     try {
-      const output = execFileSync('git', diffArgs, { cwd: repo.repoPath, encoding: 'utf-8' });
+      const output = execFileSync('git', gitArgs, {
+        cwd: repo.repoPath,
+        encoding: 'utf-8',
+        maxBuffer: 64 * 1024 * 1024,
+      });
       let current: FileChange | null = null;
+      // Metadata lines are read only between a file header and its first hunk; a hunk
+      // body line such as "--- /dev/null" is content, never metadata.
+      let inHeader = false;
       for (const line of output.split('\n')) {
-        const header = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-        if (header) {
-          current = { whole: null, ranges: [] };
-          changedFiles.set(header[2], current);
+        if (line.startsWith('diff --git a/')) {
+          const rest = line.slice('diff --git a/'.length); // "<path> b/<path>"
+          current = { whole: null, hunks: [] };
+          changedFiles.set(rest.slice(0, (rest.length - ' b/'.length) / 2), current);
+          inHeader = true;
         } else if (!current) {
           continue;
-        } else if (line === '--- /dev/null') {
+        } else if (inHeader && line.startsWith('new file mode')) {
           current.whole = 'Added';
-        } else if (line === '+++ /dev/null') {
+        } else if (inHeader && line.startsWith('deleted file mode')) {
           current.whole = 'Deleted';
         } else {
-          const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line);
+          const hunk = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
           if (hunk) {
-            const start = Number(hunk[1]);
-            const count = hunk[2] === undefined ? 1 : Number(hunk[2]);
-            // A pure deletion has no new lines; it touches the symbol around that point.
-            current.ranges.push(count === 0 ? [start, start + 1] : [start, start + count - 1]);
+            inHeader = false;
+            current.hunks.push({ start: Number(hunk[1]), count: hunk[2] === undefined ? 1 : Number(hunk[2]) });
           }
         }
       }
@@ -1623,8 +1643,10 @@ export class LocalBackend {
     }
 
     // Map each file's hunks to the indexed symbols whose line range they touch.
-    // Indexed lines are 0-based, hunk ranges 1-based. A file-level node has no
-    // range and is never a changed symbol; a whole-file change takes every symbol.
+    // Indexed lines are 0-based, hunk lines 1-based. A hunk with old lines touches the
+    // symbols overlapping [start, start+count-1]; a pure insertion (count 0) sits after
+    // old line `start` and touches only the symbol containing that line. A file-level
+    // node has no range and is never a changed symbol; a whole-file change takes every symbol.
     const changedSymbols: any[] = [];
     for (const [file, change] of changedFiles) {
       const normalizedFile = file.replace(/\\/g, '/');
@@ -1644,7 +1666,11 @@ export class LocalBackend {
           if (startLine == null || endLine == null) continue;
           const touched =
             change.whole !== null ||
-            change.ranges.some(([from, to]) => startLine + 1 <= to && endLine + 1 >= from);
+            change.hunks.some(({ start, count }) =>
+              count === 0
+                ? startLine + 1 <= start && endLine + 1 >= start
+                : startLine + 1 <= start + count - 1 && endLine + 1 >= start,
+            );
           if (!touched) continue;
           changedSymbols.push({
             id: sym.id || sym[0],
