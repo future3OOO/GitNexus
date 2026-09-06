@@ -907,6 +907,66 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         payload = self.payload(result, marker)
         self.assertEqual(self.names(payload), {"Service", "compute"}, marker + ": " + json.dumps(payload)[:600])
 
+    def test_a_test_reached_through_a_cobol_program_container_is_included(self) -> None:
+        marker = "COBOL_CONTAINER_REACHED_TEST_MISSING"
+        # Editing a paragraph reports the paragraph and its program Module; the test program
+        # calls that Module, so it is reachable only through the container.
+        caller = (
+            "       IDENTIFICATION DIVISION.\n"
+            "       PROGRAM-ID. TESTDEMO.\n"
+            "       PROCEDURE DIVISION.\n"
+            "       CHECK-IT.\n"
+            "           CALL 'DEMO'.\n"
+            "           STOP RUN.\n"
+        )
+        self.commit_and_sync({"prog.cbl": COBOL, "tests/test_prog.cbl": caller})
+        (self.source / "prog.cbl").write_text(COBOL.replace("           DISPLAY 'B'.\n", "           DISPLAY 'C'.\n"), encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+
+        changed = {s["id"] for s in payload["changed_symbols"] if s["filePath"] == "prog.cbl"}
+        self.assertIn("Module:prog.cbl:DEMO", changed, marker + ": the program Module must be a reported container: " + json.dumps(sorted(changed)))
+        self.assertIn("Module:tests/test_prog.cbl:TESTDEMO", {t["id"] for t in payload.get("impacted_tests", [])},
+                      marker + ": " + json.dumps(payload.get("impacted_tests"))[:600])
+
+    def test_a_markdown_section_reaches_no_test_in_this_graph(self) -> None:
+        marker = "MARKDOWN_SECTION_REACHABILITY_UNMEASURED"
+        # The contract names parent Markdown sections as containers. This records what the
+        # graph actually holds for them: only downward CONTAINS edges, so nothing upstream of
+        # a section can be a test, and an empty impacted-test set there is correct rather
+        # than a missed edge. A future processor that adds an upstream edge fails this.
+        self.commit_and_sync({"guide.md": GUIDE, "tests/test_guide.md": "# Test Guide\n\nSee [Setup](guide.md#setup).\n"})
+        (self.source / "guide.md").write_text(GUIDE.replace("## Setup\n", "## Setup   \n"), encoding="utf-8")
+
+        payload = self.payload(self.detect_worktree(), marker)
+        edges = self.cli("cypher", "MATCH (a)-[r:CodeRelation]->(b) WHERE b.filePath = 'guide.md' RETURN a.id AS caller, r.type AS relType",
+                         "-r", str(self.cache))
+
+        self.assertEqual(edges.returncode, 0, marker + ": " + edges.stdout + edges.stderr)
+        changed = {s["id"] for s in payload["changed_symbols"] if s["filePath"] == "guide.md"}
+        self.assertTrue(changed, marker + ": the edited section must be reported: " + json.dumps(payload)[:600])
+        self.assertNotIn("tests/", " ".join(t["filePath"] for t in payload.get("impacted_tests", [])),
+                         marker + ": a Markdown-reachable test would change this contract: " + json.dumps(payload.get("impacted_tests")))
+        self.assertNotIn("tests/test_guide.md", edges.stdout,
+                         marker + ": the graph gained an upstream edge into a Markdown file; the container promise is now testable positively")
+
+    def test_a_clean_filter_makes_the_snapshot_unrecordable(self) -> None:
+        marker = "CLEAN_FILTER_SNAPSHOT_TRUSTED"
+        # A clean filter rewrites content between the working file and the stored blob, so a
+        # captured tree would describe bytes the graph never read. Recording it would map
+        # hunks onto lines that were never indexed, so nothing is recorded and the later read
+        # refuses for missing metadata rather than mis-attributing.
+        self.git(self.cache, "config", "filter.strip.clean", "sed '/DROP-ME/d'")
+        (self.cache / ".gitattributes").write_text("*.py filter=strip\n", encoding="utf-8")
+        (self.cache / "svc.py").write_text("# DROP-ME\n" + SERVICE, encoding="utf-8")
+        self.git(self.cache, "add", "-A")
+        self.git(self.cache, "commit", "-q", "-m", "filtered")
+        self.analyze_cache("--force")
+
+        self.assertNotIn("indexedTree", self.meta(), marker + ": " + json.dumps(self.meta()))
+        body = self.refusal(self.detect_worktree(), marker)
+        self.assertIn("indexedTree", body["error"], marker + ": " + body["error"])
+
     def test_scope_with_worktree_is_refused(self) -> None:
         marker = "SCOPE_SILENTLY_IGNORED_WITH_WORKTREE"
         self.edit_compute()

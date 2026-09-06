@@ -23,10 +23,41 @@ export const getCurrentCommit = (repoPath: string): string => {
 };
 
 /**
+ * The first tracked path the checkout's attributes assign a `filter` driver to, or `''`.
+ * A clean filter rewrites content between the working file and the stored blob, so a tree
+ * captured from such a checkout describes bytes no reader ever saw.
+ */
+const filteredPath = (repoPath: string): string => {
+  const run = (args: string[], input?: string): string =>
+    execFileSync('git', args, {
+      cwd: repoPath,
+      input,
+      encoding: 'utf-8',
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  const tracked = run(['ls-files', '-z']);
+  if (!tracked) return '';
+  // check-attr reports "<path>\0filter\0<value>\0" per path; anything but unspecified or
+  // unset names a driver that can rewrite the content.
+  const reported = run(['check-attr', '--stdin', '-z', 'filter'], tracked).split('\0');
+  for (let index = 0; index + 2 < reported.length; index += 3) {
+    const value = reported[index + 2];
+    if (value && value !== 'unspecified' && value !== 'unset') return reported[index];
+  }
+  return '';
+};
+
+/**
  * The tree id of a checkout's working tree — tracked and untracked files, with ignored
  * files and the `.gitnexus/` index directory excluded — written into its object store
  * through a throwaway index, so the checkout's own index and staging state are untouched.
- * Throws when git cannot capture it.
+ *
+ * The tree is only useful as a line-coordinate baseline while its blobs hold the bytes the
+ * files hold, so a checkout configured with a content-rewriting clean filter is refused
+ * rather than captured: the caller records no snapshot and later reads refuse for missing
+ * metadata, instead of mapping hunks onto lines that were never indexed. Throws when git
+ * cannot capture the tree or when a filter makes the capture untrustworthy.
  */
 export const writeWorkingTree = (repoPath: string): string => {
   const scratch = mkdtempSync(path.join(tmpdir(), 'gitnexus-tree-'));
@@ -44,6 +75,12 @@ export const writeWorkingTree = (repoPath: string): string => {
       execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: repoPath, stdio: 'ignore' });
     } catch {
       hasHead = false;
+    }
+    const filtered = filteredPath(repoPath);
+    if (filtered) {
+      throw new Error(
+        `a clean filter rewrites ${filtered} on the way into the object store, so the captured tree would not hold the bytes this checkout holds`,
+      );
     }
     git('read-tree', hasHead ? 'HEAD' : '--empty');
     // The checkout's own ignore rules decide what is content, including the user's global
