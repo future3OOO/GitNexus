@@ -42,7 +42,8 @@ async function getBackend(): Promise<LocalBackend> {
  * Falls back to stderr if the fd write fails (e.g., broken pipe).
  *
  * A structured `{ error }` result exits 1: the JSON is the answer, the exit
- * status is the verdict, so scripts and hooks can branch on it.
+ * status is the verdict, so scripts and hooks can branch on it. The status is
+ * set, not forced, so a stderr fallback on an asynchronous pipe still flushes.
  */
 function output(data: any): void {
   const text = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
@@ -57,7 +58,7 @@ function output(data: any): void {
     // Fallback: stderr (previous behavior, works on all platforms)
     process.stderr.write(text + '\n');
   }
-  if (data && typeof data === 'object' && 'error' in data) process.exit(1);
+  if (data && typeof data === 'object' && 'error' in data) process.exitCode = 1;
 }
 
 /**

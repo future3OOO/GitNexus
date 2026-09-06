@@ -538,11 +538,11 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
 
     def test_cli_not_found_reply_echoes_a_selector_that_fits(self) -> None:
-        # Sixty quotes serialize to exactly the 122-byte budget: admitted, echoed, still bounded.
+        # Sixty quotes serialize to exactly the 122-byte budget: admitted, echoed escaped, still bounded.
         marker = "NOT_FOUND_ADMITTED_SELECTOR_DROPPED"
         result = self.cli("cypher", "-r", '"' * 60, COUNT)
         self.assertEqual(result.returncode, 1, marker + f": exit {result.returncode}")
-        self.assertTrue(json.loads(result.stdout).get("error", "").startswith('Repository "' + '"' * 60 + '" not found.'), marker + f": {result.stdout[:200]}")
+        self.assertIn(json.dumps('"' * 60), json.loads(result.stdout).get("error", ""), marker + f": {result.stdout[:200]}")
         self.assertLess(len(result.stdout.encode("utf-8")), 500, marker + f": {len(result.stdout.encode('utf-8'))} bytes")
 
     def test_timeout_reaps_runner_child(self) -> None:
