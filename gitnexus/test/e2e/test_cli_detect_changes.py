@@ -90,6 +90,24 @@ class DetectChangesCliTests(unittest.TestCase):
         self.assertIn("value", self.names(payload), marker + ": " + result.stdout[:600])
         self.assertEqual(payload["summary"]["changed_files"], 1, marker)
 
+    def test_a_hunk_inside_one_function_reports_only_that_function(self) -> None:
+        marker = "SIBLING_SYMBOL_REPORTED_CHANGED"
+        (self.repo / "app.py").write_text(BASE.replace("return value() + 1", "return value() + 2"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"other"}, marker + ": " + json.dumps(payload)[:600])
+        self.assertEqual(payload["summary"]["changed_count"], 1, marker + ": " + json.dumps(payload["summary"]))
+
+    def test_a_deleted_file_reports_its_symbols_as_deleted(self) -> None:
+        marker = "DELETED_FILE_SYMBOLS_LOST"
+        self.git("rm", "-q", "lib.py")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        deleted = {s["name"]: s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(deleted.get("helper"), "Deleted", marker + ": " + json.dumps(payload)[:600])
+
     def test_an_unknown_repo_is_refused_as_json(self) -> None:
         self.assert_refused_as_json(self.cli("detect-changes", "-r", str(self.tmp / "nowhere")),
                                     "DETECT_CHANGES_BAD_REPO_NOT_REFUSED")
