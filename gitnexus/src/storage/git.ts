@@ -84,10 +84,10 @@ export const writeWorkingTree = (repoPath: string): string => {
     }
     git('read-tree', hasHead ? 'HEAD' : '--empty');
     // The checkout's own ignore rules decide what is content, including the user's global
-    // excludes file, so nothing they ignore is captured. The index directory is dropped
-    // afterwards rather than through a pathspec or a replacement excludes file: `git add`
-    // refuses a pathspec naming an already-ignored path, and overriding core.excludesFile
-    // would capture whatever the user ignores only there.
+    // excludes file, so nothing they ignore is captured, and overriding core.excludesFile
+    // would capture whatever the user ignores only there. The index directory is dropped
+    // afterwards rather than through a pathspec, because `git add` refuses a pathspec
+    // naming an already-ignored path and analyze writes that ignore rule itself.
     git('add', '-A', '--', '.');
     git('rm', '--cached', '-r', '-q', '--ignore-unmatch', '--', '.gitnexus');
     return git('write-tree');

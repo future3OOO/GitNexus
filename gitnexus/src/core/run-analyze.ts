@@ -122,7 +122,11 @@ export async function runFullAnalysis(
   const existingMeta = await loadMeta(storagePath);
 
   // ── Early-return: already up to date ──────────────────────────────
-  if (existingMeta && !options.force && existingMeta.lastCommit === currentCommit) {
+  // An index built before snapshots existed carries no `indexedTree`, and the tree can only
+  // be recorded honestly alongside the graph built from it, so such an index is not up to
+  // date however current its commit is: it rebuilds once and gains the snapshot.
+  const hasSnapshot = !repoHasGit || Boolean(existingMeta?.indexedTree);
+  if (existingMeta && !options.force && hasSnapshot && existingMeta.lastCommit === currentCommit) {
     // Non-git folders have currentCommit = '' — always rebuild since we can't detect changes
     if (currentCommit !== '') {
       return {

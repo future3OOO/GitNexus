@@ -1615,6 +1615,9 @@ export class LocalBackend {
           'scope and base_ref select a same-checkout baseline; with worktree the baseline is the indexed snapshot',
         );
       }
+      if (typeof params.worktree !== 'string' || params.worktree.trim() === '') {
+        return unavailable('worktree must be the path of an edited checkout root, not an empty or non-string value');
+      }
       const worktree = path.resolve(params.worktree);
       let toplevel: string;
       try {
@@ -1731,6 +1734,7 @@ export class LocalBackend {
     // Git's header lines and is a whole-file change carrying that as its change_type.
     type FileChange = { whole: 'Added' | 'Deleted' | null; hunks: Array<{ start: number; count: number }> };
     const changedFiles = new Map<string, FileChange>();
+    const droppedHeaders: string[] = [];
     try {
       const output = execFileSync('git', gitArgs, {
         cwd,
@@ -1750,7 +1754,9 @@ export class LocalBackend {
           inHeader = true;
         } else if (line.startsWith('diff --git ')) {
           // Git still quotes a path holding a double quote, backslash, or control
-          // character; that file is not mapped and must not feed the previous one.
+          // character; that file is not mapped and must not feed the previous one. It is a
+          // changed path this run cannot attribute, so it is reported rather than dropped.
+          droppedHeaders.push(line.slice('diff --git '.length));
           current = null;
           inHeader = false;
         } else if (!current) {
@@ -1779,6 +1785,9 @@ export class LocalBackend {
     // them, where a new file surfaces as an Added change below.
     const gaps: Array<{ path: string; reason: string }> = [];
     const reasons: string[] = [];
+    for (const header of droppedHeaders) {
+      gaps.push({ path: header, reason: 'git quoted this path, so the diff header could not be mapped to a file' });
+    }
     if (params.worktree === undefined && params.scope !== 'staged') {
       try {
         const untracked = execFileSync(
