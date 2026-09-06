@@ -1238,16 +1238,27 @@ class WorktreeDetectChangesTests(unittest.TestCase):
 
     def test_an_incomplete_walk_publishes_null_rather_than_zero(self) -> None:
         marker = "UNMEASURED_COVERAGE_PUBLISHED_AS_ZERO"
-        # A name holding an apostrophe breaks the depth-1 query's own escaping, so the walk
-        # fails while the symbol lookup succeeds. Zero already means "no caller is known", so
-        # publishing it for a symbol nobody measured states a fact that was never checked.
+        # Zero already means "no caller is known", so publishing it for a symbol nobody
+        # measured states a fact that was never checked.
+        #
+        # The only way this suite can reach an incomplete walk is a name holding an
+        # apostrophe, which breaks the depth-1 query's own escaping at local-backend.ts:2533
+        # while the symbol lookup still succeeds. That is a real defect and a legitimate fix
+        # target, so this attack is deliberately coupled to it: the alternatives are a
+        # substituted collaborator, which the mock ban forbids, or no coverage at all.
+        # Whoever fixes the escaping will see the first assertion below fail with this
+        # message rather than watch the attack pass vacuously — at that point the walk can no
+        # longer be made to fail through the supported Interface, and this attack should be
+        # deleted with the proof gap recorded, not repaired with a fake driver.
         self.commit_and_sync({"o'ne.py": "def apostrophe():\n    return 1\n"})
         (self.source / "o'ne.py").write_text("def apostrophe():\n    return 2\n", encoding="utf-8")
 
         payload = self.payload(self.detect_worktree(), marker)
 
         analysis = payload["analysis"]
-        self.assertEqual(analysis["status"], "partial", marker + ": " + json.dumps(analysis))
+        self.assertEqual(analysis["status"], "partial",
+                         marker + ": the apostrophe no longer fails the depth-1 query, so this attack has lost its"
+                         " only real driver; delete it and record the proof gap. " + json.dumps(analysis))
         self.assertIsNone(analysis["uncovered_symbols"],
                           marker + ": an unmeasured count is not zero: " + json.dumps(analysis))
         for symbol in payload["changed_symbols"]:
