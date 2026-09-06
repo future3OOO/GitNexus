@@ -646,7 +646,9 @@ export const executeQueryIsolated = async (repoId: string, cypher: string): Prom
       }
       reject(
         new Error(
-          `Query crashed the graph engine (${signal ?? `exit code ${code}`}); the server is still up.`,
+          `Query crashed the graph engine (${signal ?? `exit code ${code}`}); the server is still up. ` +
+            'Known trigger: a variable-length path with an ALL or ANY predicate over relationships(p) ' +
+            'segfaults the engine; do not retry variants of it, use the impact tool for that traversal.',
         ),
       );
     });

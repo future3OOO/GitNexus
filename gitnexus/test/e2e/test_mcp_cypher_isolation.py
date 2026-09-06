@@ -217,6 +217,27 @@ class McpCypherIsolationTests(unittest.TestCase):
             self.skipTest("the engine hung instead of crashing on this run; the timeout reply already shows the server survived")
         self.assertIn("SIGSEGV", str(crashed.get("error", "")), marker + f": {crashed}")
 
+    def test_crash_reply_names_the_trigger_and_the_alternative(self) -> None:
+        # claude-skills#197: a caller who reads only the crash reply must learn the known
+        # trigger and where to go instead, or its next move is another crashed child.
+        marker = "CRASH_REPLY_LACKS_GUIDANCE"
+        self.require_crash()
+        crashed = self.client().call("cypher", {"repo": REPO, "query": CRASH})
+        self.assertIsNotNone(crashed, marker + " (no response)")
+        error = str(crashed.get("error", ""))
+        if "timed out" in error:
+            self.skipTest("the engine hung instead of crashing on this run; the timeout reply already shows the server survived")
+        self.assertIn("relationships(p)", error, marker + f": {error}")
+        self.assertIn("impact", error, marker + f": {error}")
+
+    def test_cypher_description_names_the_trigger_and_the_alternative(self) -> None:
+        marker = "CYPHER_DESCRIPTION_LACKS_GUIDANCE"
+        listed = self.client().request("tools/list", {})
+        self.assertIsNotNone(listed, marker + " (no response)")
+        [cypher] = [tool for tool in listed["result"]["tools"] if tool["name"] == "cypher"]
+        self.assertIn("relationships(p)", cypher["description"], marker + f": {cypher['description'][:300]}")
+        self.assertIn("impact", cypher["description"], marker + f": {cypher['description'][:300]}")
+
     def test_other_tools_answer_after_crash(self) -> None:
         marker = "OTHER_TOOLS_DEAD_AFTER_CRASH"
         self.require_crash()
