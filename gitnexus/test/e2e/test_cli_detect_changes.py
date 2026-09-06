@@ -90,6 +90,154 @@ class DetectChangesCliTests(unittest.TestCase):
         self.assertIn("value", self.names(payload), marker + ": " + result.stdout[:600])
         self.assertEqual(payload["summary"]["changed_files"], 1, marker)
 
+    def test_a_hunk_inside_one_function_reports_only_that_function(self) -> None:
+        marker = "SIBLING_SYMBOL_REPORTED_CHANGED"
+        (self.repo / "app.py").write_text(BASE.replace("return value() + 1", "return value() + 2"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"other"}, marker + ": " + json.dumps(payload)[:600])
+        self.assertEqual(payload["summary"]["changed_count"], 1, marker + ": " + json.dumps(payload["summary"]))
+
+    def test_a_deleted_file_reports_its_symbols_as_deleted(self) -> None:
+        marker = "DELETED_FILE_SYMBOLS_LOST"
+        self.git("rm", "-q", "lib.py")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        deleted = {s["name"]: s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(deleted.get("helper"), "Deleted", marker + ": " + json.dumps(payload)[:600])
+
+    def commit_and_analyze(self, path: str, content: str) -> None:
+        (self.repo / path).write_text(content, encoding="utf-8")
+        self.git("add", path)
+        self.git("commit", "-q", "-m", f"add {path}")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+
+    def test_a_non_ascii_path_reports_its_symbol(self) -> None:
+        marker = "QUOTED_PATH_DROPPED"
+        self.commit_and_analyze("café.py", "def accent():\n    return 1\n")
+        (self.repo / "café.py").write_text("def accent():\n    return 2\n", encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"accent"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_deleted_body_line_that_diffs_as_dev_null_keeps_the_file_modified(self) -> None:
+        marker = "BODY_LINE_READ_AS_METADATA"
+        content = 'def value():\n    return 1\n\n\ndef note():\n    text = """\n-- /dev/null\n"""\n    return text\n'
+        self.commit_and_analyze("doc.py", content)
+        (self.repo / "doc.py").write_text(content.replace("-- /dev/null\n", ""), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        changed = {s["name"]: s["change_type"] for s in payload["changed_symbols"] if s["filePath"] == "doc.py"}
+        self.assertEqual(changed, {"note": "Modified"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_deleted_binary_attributed_file_reports_its_symbols_as_deleted(self) -> None:
+        marker = "BINARY_DELETION_SYMBOLS_LOST"
+        (self.repo / ".gitattributes").write_text("lib.py -diff\n", encoding="utf-8")
+        self.git("add", ".gitattributes")
+        self.git("commit", "-q", "-m", "attributes")
+        self.git("rm", "-q", "lib.py")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        deleted = {s["name"]: s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(deleted.get("helper"), "Deleted", marker + ": " + json.dumps(payload)[:600])
+
+    def test_deleting_a_blank_separator_line_reports_no_symbol(self) -> None:
+        marker = "SEPARATOR_DELETION_REPORTED_NEIGHBOUR"
+        (self.repo / "app.py").write_text(BASE.replace("\n\n\n", "\n\n", 1), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual((payload["changed_symbols"], payload["summary"]["changed_count"]), ([], 0),
+                         marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_patch_above_one_mebibyte_is_analysed(self) -> None:
+        marker = "LARGE_PATCH_FAILED"
+        padding = "".join(f"    pad_{index} = {index}\n" for index in range(60000))
+        (self.repo / "lib.py").write_text("def helper():\n" + padding + "    return 'a'\n", encoding="utf-8")
+
+        result = self.cli("detect-changes", "-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(result.returncode, 0, marker + ": " + (result.stdout + result.stderr)[:600])
+        payload = json.loads(result.stdout)
+        self.assertNotIn("error", payload, marker + ": " + result.stdout[:600])
+        self.assertEqual(self.names(payload), {"helper"}, marker + ": " + result.stdout[:600])
+
+    def test_hunks_are_mapped_on_the_lines_the_index_was_built_from(self) -> None:
+        marker = "SHIFTED_HUNK_MISMAPPED"
+        shifted = "import os\nimport sys\nimport json\n" + BASE.replace("return value() + 1", "return value() + 2")
+        (self.repo / "app.py").write_text(shifted, encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"other"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_an_insertion_inside_a_function_reports_that_function(self) -> None:
+        marker = "INSERTION_INSIDE_FUNCTION_MISSED"
+        (self.repo / "app.py").write_text(BASE.replace("def value():\n", "def value():\n    x = 1\n"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_quoted_header_does_not_attach_its_hunks_to_the_previous_file(self) -> None:
+        marker = "QUOTED_HEADER_HUNKS_MISATTRIBUTED"
+        quoted = 'q"uote.py'
+        self.commit_and_analyze(quoted, "def one():\n    return 1\n\n\ndef two():\n    return 2\n")
+        (self.repo / "app.py").write_text(EDITED, encoding="utf-8")
+        (self.repo / quoted).write_text("def one():\n    return 1\n\n\ndef two():\n    return 3\n", encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_prefixless_diff_configuration_still_maps_hunks(self) -> None:
+        marker = "PREFIX_CONFIGURATION_BROKE_HEADERS"
+        self.git("config", "diff.noprefix", "true")
+        self.git("config", "diff.mnemonicPrefix", "true")
+        (self.repo / "app.py").write_text(EDITED, encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        self.assertEqual(self.names(payload), {"value"}, marker + ": " + json.dumps(payload)[:600])
+
+    def test_a_staged_rename_reports_the_old_file_symbols_as_deleted(self) -> None:
+        marker = "RENAME_HID_THE_DELETION"
+        self.git("mv", "lib.py", "lib2.py")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        changed = {(s["filePath"], s["name"]): s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(changed.get(("lib.py", "helper")), "Deleted", marker + ": " + json.dumps(payload)[:600])
+
+    def test_an_indexed_new_file_reports_its_symbols_as_added(self) -> None:
+        marker = "NEW_FILE_NOT_CLASSIFIED_ADDED"
+        (self.repo / "fresh.py").write_text("def fresh():\n    return 1\n", encoding="utf-8")
+        self.git("add", "fresh.py")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+
+        payload = self.detect("-r", str(self.repo), "--scope", "staged")
+
+        changed = {s["name"]: s["change_type"] for s in payload["changed_symbols"]}
+        self.assertEqual(changed.get("fresh"), "Added", marker + ": " + json.dumps(payload)[:600])
+
+    def test_deleting_the_only_separator_line_reports_no_symbol(self) -> None:
+        marker = "ZERO_COUNT_DELETION_WIDENED"
+        content = "def value():\n    return 1\n\ndef other():\n    return value() + 1\n"
+        self.commit_and_analyze("tight.py", content)
+        (self.repo / "tight.py").write_text(content.replace("\n\ndef other", "\ndef other"), encoding="utf-8")
+
+        payload = self.detect("-r", str(self.repo), "--scope", "unstaged")
+
+        tight = [s["name"] for s in payload["changed_symbols"] if s["filePath"] == "tight.py"]
+        self.assertEqual(tight, [], marker + ": " + json.dumps(payload)[:600])
+
     def test_an_unknown_repo_is_refused_as_json(self) -> None:
         self.assert_refused_as_json(self.cli("detect-changes", "-r", str(self.tmp / "nowhere")),
                                     "DETECT_CHANGES_BAD_REPO_NOT_REFUSED")

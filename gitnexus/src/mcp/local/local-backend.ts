@@ -1556,37 +1556,85 @@ export class LocalBackend {
     const scope = params.scope || 'unstaged';
     const { execFileSync } = await import('child_process');
 
-    // Build git diff args based on scope (using execFileSync to avoid shell injection)
+    // Build git diff args based on scope (using execFileSync to avoid shell injection).
+    // --unified=0 keeps only the changed lines, so each hunk header maps onto symbol line ranges.
+    const diffFlags = ['--unified=0', '--no-color', '--no-ext-diff'];
     let diffArgs: string[];
     switch (scope) {
       case 'staged':
-        diffArgs = ['diff', '--staged', '--name-only'];
+        diffArgs = ['diff', '--staged', ...diffFlags];
         break;
       case 'all':
-        diffArgs = ['diff', 'HEAD', '--name-only'];
+        diffArgs = ['diff', 'HEAD', ...diffFlags];
         break;
       case 'compare':
         if (!params.base_ref) return { error: 'base_ref is required for "compare" scope' };
-        diffArgs = ['diff', params.base_ref, '--name-only'];
+        diffArgs = ['diff', params.base_ref, ...diffFlags];
         break;
       case 'unstaged':
       default:
-        diffArgs = ['diff', '--name-only'];
+        diffArgs = ['diff', ...diffFlags];
         break;
     }
 
-    let changedFiles: string[];
+    // Pin the header shape Git emits regardless of user configuration: raw (unquoted)
+    // non-ASCII paths, the standard a/ b/ prefixes, and no rename detection, so a rename
+    // is a deletion plus an addition and both halves of every header name one path.
+    const gitArgs = [
+      '-c', 'core.quotePath=false',
+      '-c', 'diff.noprefix=false',
+      '-c', 'diff.mnemonicPrefix=false',
+      '-c', 'diff.srcPrefix=a/',
+      '-c', 'diff.dstPrefix=b/',
+      ...diffArgs,
+      '--no-renames',
+    ];
+
+    // Each changed file with its hunks in old-side (pre-change) coordinates, which are
+    // the lines the index was built from. An added or deleted file is classified from
+    // Git's header lines and is a whole-file change carrying that as its change_type.
+    type FileChange = { whole: 'Added' | 'Deleted' | null; hunks: Array<{ start: number; count: number }> };
+    const changedFiles = new Map<string, FileChange>();
     try {
-      const output = execFileSync('git', diffArgs, { cwd: repo.repoPath, encoding: 'utf-8' });
-      changedFiles = output
-        .trim()
-        .split('\n')
-        .filter((f) => f.length > 0);
+      const output = execFileSync('git', gitArgs, {
+        cwd: repo.repoPath,
+        encoding: 'utf-8',
+        maxBuffer: 64 * 1024 * 1024,
+      });
+      let current: FileChange | null = null;
+      // Metadata lines are read only between a file header and its first hunk; a hunk
+      // body line such as "--- /dev/null" is content, never metadata.
+      let inHeader = false;
+      for (const line of output.split('\n')) {
+        if (line.startsWith('diff --git a/')) {
+          const rest = line.slice('diff --git a/'.length); // "<path> b/<path>"
+          current = { whole: null, hunks: [] };
+          changedFiles.set(rest.slice(0, (rest.length - ' b/'.length) / 2), current);
+          inHeader = true;
+        } else if (line.startsWith('diff --git ')) {
+          // Git still quotes a path holding a double quote, backslash, or control
+          // character; that file is not mapped and must not feed the previous one.
+          current = null;
+          inHeader = false;
+        } else if (!current) {
+          continue;
+        } else if (inHeader && line.startsWith('new file mode')) {
+          current.whole = 'Added';
+        } else if (inHeader && line.startsWith('deleted file mode')) {
+          current.whole = 'Deleted';
+        } else {
+          const hunk = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
+          if (hunk) {
+            inHeader = false;
+            current.hunks.push({ start: Number(hunk[1]), count: hunk[2] === undefined ? 1 : Number(hunk[2]) });
+          }
+        }
+      }
     } catch (err: any) {
       return { error: `Git diff failed: ${err.message}` };
     }
 
-    if (changedFiles.length === 0) {
+    if (changedFiles.size === 0) {
       return {
         summary: {
           changed_count: 0,
@@ -1599,27 +1647,42 @@ export class LocalBackend {
       };
     }
 
-    // Map changed files to indexed symbols
+    // Map each file's hunks to the indexed symbols whose line range they touch.
+    // Indexed lines are 0-based, hunk lines 1-based. A hunk with old lines touches the
+    // symbols overlapping [start, start+count-1]; a pure insertion (count 0) sits after
+    // old line `start` and touches only the symbol containing that line. A file-level
+    // node has no range and is never a changed symbol; a whole-file change takes every symbol.
     const changedSymbols: any[] = [];
-    for (const file of changedFiles) {
+    for (const [file, change] of changedFiles) {
       const normalizedFile = file.replace(/\\/g, '/');
       try {
         const symbols = await executeParameterized(
           repo.id,
           `
-          MATCH (n) WHERE n.filePath CONTAINS $filePath
-          RETURN n.id AS id, n.name AS name, labels(n)[0] AS type, n.filePath AS filePath
-          LIMIT 20
+          MATCH (n) WHERE n.filePath = $filePath
+          RETURN n.id AS id, n.name AS name, labels(n)[0] AS type, n.filePath AS filePath,
+                 n.startLine AS startLine, n.endLine AS endLine
         `,
           { filePath: normalizedFile },
         );
         for (const sym of symbols) {
+          const startLine = sym.startLine ?? sym[4];
+          const endLine = sym.endLine ?? sym[5];
+          if (startLine == null || endLine == null) continue;
+          const touched =
+            change.whole !== null ||
+            change.hunks.some(({ start, count }) =>
+              count === 0
+                ? startLine + 1 <= start && endLine + 1 >= start
+                : startLine + 1 <= start + count - 1 && endLine + 1 >= start,
+            );
+          if (!touched) continue;
           changedSymbols.push({
             id: sym.id || sym[0],
             name: sym.name || sym[1],
             type: sym.type || sym[2],
             filePath: sym.filePath || sym[3],
-            change_type: 'Modified',
+            change_type: change.whole ?? 'Modified',
           });
         }
       } catch (e) {
@@ -1674,7 +1737,7 @@ export class LocalBackend {
       summary: {
         changed_count: changedSymbols.length,
         affected_count: processCount,
-        changed_files: changedFiles.length,
+        changed_files: changedFiles.size,
         risk_level: risk,
       },
       changed_symbols: changedSymbols,
