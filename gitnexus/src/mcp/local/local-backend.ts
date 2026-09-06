@@ -1616,7 +1616,9 @@ export class LocalBackend {
         );
       }
       if (typeof params.worktree !== 'string' || params.worktree.trim() === '') {
-        return unavailable('worktree must be the path of an edited checkout root, not an empty or non-string value');
+        return unavailable(
+          'worktree must be the path of an edited checkout root, not an empty or non-string value',
+        );
       }
       const worktree = path.resolve(params.worktree);
       let toplevel: string;
@@ -1629,7 +1631,10 @@ export class LocalBackend {
         return unavailable(`worktree ${worktree} is not a checkout root (the root is ${toplevel})`);
       }
       const meta = await loadMeta(repo.storagePath);
-      if (!meta) return unavailable(`index metadata is missing at ${repo.storagePath}; run gitnexus analyze`);
+      if (!meta)
+        return unavailable(
+          `index metadata is missing at ${repo.storagePath}; run gitnexus analyze`,
+        );
       if (!meta.lastCommit) {
         return unavailable(
           'index metadata records no lastCommit (the indexed source commit); re-run gitnexus analyze on a git checkout',
@@ -1659,9 +1664,14 @@ export class LocalBackend {
       // the worktree reads it from there, so independent clones need no shared .git.
       let objects: string;
       try {
-        objects = path.resolve(repo.repoPath, gitIn(repo.repoPath, ['rev-parse', '--git-path', 'objects']));
+        objects = path.resolve(
+          repo.repoPath,
+          gitIn(repo.repoPath, ['rev-parse', '--git-path', 'objects']),
+        );
       } catch (err) {
-        return unavailable(`indexed repository ${repo.repoPath} has no git object store: ${firstLine(err)}`);
+        return unavailable(
+          `indexed repository ${repo.repoPath} has no git object store: ${firstLine(err)}`,
+        );
       }
       // Git splits this list on the path delimiter and reads C-style quoting, so a path
       // holding a delimiter or a quote is quoted rather than silently split into two.
@@ -1670,7 +1680,10 @@ export class LocalBackend {
         : objects;
       env = {
         ...process.env,
-        GIT_ALTERNATE_OBJECT_DIRECTORIES: [quotedObjects, process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES]
+        GIT_ALTERNATE_OBJECT_DIRECTORIES: [
+          quotedObjects,
+          process.env.GIT_ALTERNATE_OBJECT_DIRECTORIES,
+        ]
           .filter(Boolean)
           .join(path.delimiter),
       };
@@ -1714,25 +1727,37 @@ export class LocalBackend {
           diffArgs = ['diff', ...diffFlags];
           break;
       }
-      baseline = { kind: 'scope', scope, ...(scope === 'compare' ? { base_ref: params.base_ref } : {}) };
+      baseline = {
+        kind: 'scope',
+        scope,
+        ...(scope === 'compare' ? { base_ref: params.base_ref } : {}),
+      };
     }
 
     // Pin the header shape Git emits regardless of user configuration: raw (unquoted)
     // non-ASCII paths and the standard a/ b/ prefixes, so both halves of every header name
     // one path.
     const gitArgs = [
-      '-c', 'core.quotePath=false',
-      '-c', 'diff.noprefix=false',
-      '-c', 'diff.mnemonicPrefix=false',
-      '-c', 'diff.srcPrefix=a/',
-      '-c', 'diff.dstPrefix=b/',
+      '-c',
+      'core.quotePath=false',
+      '-c',
+      'diff.noprefix=false',
+      '-c',
+      'diff.mnemonicPrefix=false',
+      '-c',
+      'diff.srcPrefix=a/',
+      '-c',
+      'diff.dstPrefix=b/',
       ...diffArgs,
     ];
 
     // Each changed file with its hunks in old-side (pre-change) coordinates, which are
     // the lines the index was built from. An added or deleted file is classified from
     // Git's header lines and is a whole-file change carrying that as its change_type.
-    type FileChange = { whole: 'Added' | 'Deleted' | null; hunks: Array<{ start: number; count: number }> };
+    type FileChange = {
+      whole: 'Added' | 'Deleted' | null;
+      hunks: Array<{ start: number; count: number }>;
+    };
     const changedFiles = new Map<string, FileChange>();
     const droppedHeaders: string[] = [];
     try {
@@ -1769,7 +1794,10 @@ export class LocalBackend {
           const hunk = /^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@/.exec(line);
           if (hunk) {
             inHeader = false;
-            current.hunks.push({ start: Number(hunk[1]), count: hunk[2] === undefined ? 1 : Number(hunk[2]) });
+            current.hunks.push({
+              start: Number(hunk[1]),
+              count: hunk[2] === undefined ? 1 : Number(hunk[2]),
+            });
           }
         }
       }
@@ -1795,7 +1823,17 @@ export class LocalBackend {
       const quoted = /^"((?:[^"\\]|\\.)*)"/.exec(header);
       let named: string;
       if (quoted) {
-        const escapes: Record<string, number> = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, '\\': 92 };
+        const escapes: Record<string, number> = {
+          a: 7,
+          b: 8,
+          t: 9,
+          n: 10,
+          v: 11,
+          f: 12,
+          r: 13,
+          '"': 34,
+          '\\': 92,
+        };
         const characters = Array.from(quoted[1]);
         const bytes: number[] = [];
         for (let at = 0; at < characters.length; ) {
@@ -1831,7 +1869,11 @@ export class LocalBackend {
           { cwd, encoding: 'utf-8', maxBuffer: 64 * 1024 * 1024 },
         );
         for (const file of untracked.split('\0')) {
-          if (file) gaps.push({ path: file.replace(/\\/g, '/'), reason: 'untracked: outside the git diff and not in the graph' });
+          if (file)
+            gaps.push({
+              path: file.replace(/\\/g, '/'),
+              reason: 'untracked: outside the git diff and not in the graph',
+            });
         }
       } catch (err) {
         reasons.push(`untracked file listing failed: ${firstLine(err)}`);
@@ -1967,9 +2009,15 @@ export class LocalBackend {
       repo,
       changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
       'upstream',
-      { maxDepth: 3, relationTypes: DEFAULT_IMPACT_RELATION_TYPES, includeTests: true, minConfidence: 0 },
+      {
+        maxDepth: 3,
+        relationTypes: DEFAULT_IMPACT_RELATION_TYPES,
+        includeTests: true,
+        minConfidence: 0,
+      },
     );
-    if (!traversalComplete) reasons.push('upstream traversal failed part-way: impacted_tests may be incomplete');
+    if (!traversalComplete)
+      reasons.push('upstream traversal failed part-way: impacted_tests may be incomplete');
     // How many callers the graph knows for each changed symbol, so an empty impacted_tests
     // set is readable: zero here means no caller is known at all, while a non-zero count
     // means callers are known and none of them is a test.
@@ -2282,10 +2330,7 @@ export class LocalBackend {
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
         : DEFAULT_IMPACT_RELATION_TYPES;
-    const relationTypes =
-      rawRelTypes.length > 0
-        ? rawRelTypes
-        : DEFAULT_IMPACT_RELATION_TYPES;
+    const relationTypes = rawRelTypes.length > 0 ? rawRelTypes : DEFAULT_IMPACT_RELATION_TYPES;
     const includeTests = params.includeTests ?? false;
     const minConfidence = params.minConfidence ?? 0;
 
@@ -2362,21 +2407,24 @@ export class LocalBackend {
     },
   ): Promise<any> {
     const symId = sym.id || sym[0];
-    const walk = await this._traverseImpact(
-      repo,
-      [{ id: symId, type: symType }],
-      direction,
-      opts,
-    );
+    const walk = await this._traverseImpact(repo, [{ id: symId, type: symType }], direction, opts);
     const impacted = walk.impacted;
-    let traversalComplete = walk.traversalComplete;
+    const traversalComplete = walk.traversalComplete;
 
     const grouped: Record<number, ImpactedNode[]> = {};
     for (const item of impacted) {
       if (!grouped[item.depth]) grouped[item.depth] = [];
       grouped[item.depth].push(item);
     }
-    return this._enrichedImpact(repo, sym, symType, direction, impacted, grouped, traversalComplete);
+    return this._enrichedImpact(
+      repo,
+      sym,
+      symType,
+      direction,
+      impacted,
+      grouped,
+      traversalComplete,
+    );
   }
 
   /**
@@ -2394,7 +2442,11 @@ export class LocalBackend {
       includeTests: boolean;
       minConfidence: number;
     },
-  ): Promise<{ impacted: ImpactedNode[]; traversalComplete: boolean; edgesIntoSeed: Map<string, number> }> {
+  ): Promise<{
+    impacted: ImpactedNode[];
+    traversalComplete: boolean;
+    edgesIntoSeed: Map<string, number>;
+  }> {
     const { maxDepth, relationTypes, includeTests, minConfidence } = opts;
     const relTypeFilter = relationTypes.map((t) => `'${t}'`).join(', ');
     const confidenceFilter = minConfidence > 0 ? ` AND r.confidence >= ${minConfidence}` : '';
@@ -2877,10 +2929,7 @@ export class LocalBackend {
       mappedRelTypes && mappedRelTypes.length > 0
         ? mappedRelTypes.filter((t: string) => VALID_RELATION_TYPES.has(t))
         : DEFAULT_IMPACT_RELATION_TYPES;
-    const relationTypes =
-      rawRelTypes.length > 0
-        ? rawRelTypes
-        : DEFAULT_IMPACT_RELATION_TYPES;
+    const relationTypes = rawRelTypes.length > 0 ? rawRelTypes : DEFAULT_IMPACT_RELATION_TYPES;
 
     try {
       return await this._runImpactBFS(repo, resolved.sym, resolved.symType, dir, {

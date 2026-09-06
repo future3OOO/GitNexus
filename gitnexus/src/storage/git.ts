@@ -88,7 +88,10 @@ export const writeWorkingTree = (repoPath: string): string => {
   try {
     let hasHead = true;
     try {
-      execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], { cwd: repoPath, stdio: 'ignore' });
+      execFileSync('git', ['rev-parse', '--verify', '-q', 'HEAD^{commit}'], {
+        cwd: repoPath,
+        stdio: 'ignore',
+      });
     } catch {
       hasHead = false;
     }
@@ -108,7 +111,10 @@ export const writeWorkingTree = (repoPath: string): string => {
     // already-ignored path, so the pathspec is passed only when the rule is absent.
     let ignoresIndex = true;
     try {
-      execFileSync('git', ['check-ignore', '-q', '--', '.gitnexus'], { cwd: repoPath, stdio: 'ignore' });
+      execFileSync('git', ['check-ignore', '-q', '--', '.gitnexus'], {
+        cwd: repoPath,
+        stdio: 'ignore',
+      });
     } catch {
       ignoresIndex = false;
     }
