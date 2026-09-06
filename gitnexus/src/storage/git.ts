@@ -36,14 +36,30 @@ const filteredPath = (repoPath: string): string => {
       maxBuffer: 64 * 1024 * 1024,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-  const tracked = run(['ls-files', '-z']);
-  if (!tracked) return '';
-  // check-attr reports "<path>\0filter\0<value>\0" per path; anything but unspecified or
-  // unset names a driver that can rewrite the content.
-  const reported = run(['check-attr', '--stdin', '-z', 'filter'], tracked).split('\0');
+  // Every path the capture stores, so an untracked source file cannot carry a filter past
+  // this check: `git add -A` stores it exactly as it stores a tracked one.
+  const paths = run(['ls-files', '-z']) + run(['ls-files', '-z', '--others', '--exclude-standard']);
+  if (!paths) return '';
+  // check-attr reports "<path>\0filter\0<value>\0" per path, and the value is whatever
+  // .gitattributes declared: a driver name, `-` for filter=-, `unset` for -filter, or
+  // `unspecified` for no attribute at all. Only a driver git holds a clean command for
+  // rewrites anything, so asking git that directly is what separates a real driver from a
+  // bare declaration and from a driver whose name happens to be one of those words.
+  const reported = run(['check-attr', '--stdin', '-z', 'filter'], paths).split('\0');
+  const rewrites = new Map<string, boolean>();
   for (let index = 0; index + 2 < reported.length; index += 3) {
     const value = reported[index + 2];
-    if (value && value !== 'unspecified' && value !== 'unset') return reported[index];
+    if (!value) continue;
+    let configured = rewrites.get(value);
+    if (configured === undefined) {
+      try {
+        configured = run(['config', '--get', `filter.${value}.clean`]).trim() !== '';
+      } catch {
+        configured = false; // git exits non-zero when the key is absent
+      }
+      rewrites.set(value, configured);
+    }
+    if (configured) return reported[index];
   }
   return '';
 };

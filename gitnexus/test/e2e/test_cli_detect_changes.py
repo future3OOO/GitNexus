@@ -950,6 +950,49 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertNotIn("tests/test_guide.md", edges.stdout,
                          marker + ": the graph gained an upstream edge into a Markdown file; the container promise is now testable positively")
 
+    def test_a_clean_filter_on_an_untracked_file_makes_the_snapshot_unrecordable(self) -> None:
+        marker = "UNTRACKED_CLEAN_FILTER_IGNORED_BY_GUARD"
+        # The capture stores untracked files too, so a filter matching one rewrites bytes the
+        # graph never read even though the file appears in no tracked listing.
+        self.git(self.cache, "config", "filter.strip.clean", "sed '/DROP-ME/d'")
+        (self.cache / ".gitattributes").write_text("scratch.py filter=strip\n", encoding="utf-8")
+        self.git(self.cache, "add", ".gitattributes")
+        self.git(self.cache, "commit", "-q", "-m", "attributes")
+        (self.cache / "scratch.py").write_text("# DROP-ME\ndef scratch():\n    return 1\n", encoding="utf-8")
+        self.assertNotEqual(self.git(self.cache, "status", "--porcelain"), "", marker + ": the file must be untracked and visible")
+
+        self.analyze_cache("--force")
+
+        self.assertNotIn("indexedTree", self.meta(), marker + ": " + json.dumps(self.meta()))
+
+    def test_a_filter_attribute_without_a_clean_command_still_records_a_snapshot(self) -> None:
+        marker = "DECLARED_FILTER_WITHOUT_CLEAN_REFUSED"
+        # git rewrites nothing for a driver it has no clean command for, and `filter=-`
+        # disables filtering outright, so neither may make snapshots unavailable.
+        (self.cache / ".gitattributes").write_text("*.py filter=nodriver\nsvc.py filter=-\n", encoding="utf-8")
+        self.git(self.cache, "add", ".gitattributes")
+        self.git(self.cache, "commit", "-q", "-m", "declared but unconfigured")
+
+        self.analyze_cache("--force")
+
+        self.assertEqual(self.meta().get("indexedTree"), write_working_tree(self.cache),
+                         marker + ": " + json.dumps(self.meta()))
+
+    def test_a_driver_named_like_a_check_attr_sentinel_still_blocks_the_snapshot(self) -> None:
+        marker = "SENTINEL_NAMED_DRIVER_SKIPPED"
+        # check-attr prints `unspecified` for a path with no filter attribute and `unset` for
+        # one that disables it, so a driver actually named `unspecified` is reported with the
+        # same string. It rewrites content all the same and must block the snapshot.
+        self.git(self.cache, "config", "filter.unspecified.clean", "sed '/DROP-ME/d'")
+        (self.cache / ".gitattributes").write_text("svc.py filter=unspecified\n", encoding="utf-8")
+        (self.cache / "svc.py").write_text("# DROP-ME\n" + SERVICE, encoding="utf-8")
+        self.git(self.cache, "add", "-A")
+        self.git(self.cache, "commit", "-q", "-m", "sentinel-named driver")
+
+        self.analyze_cache("--force")
+
+        self.assertNotIn("indexedTree", self.meta(), marker + ": " + json.dumps(self.meta()))
+
     def test_a_clean_filter_makes_the_snapshot_unrecordable(self) -> None:
         marker = "CLEAN_FILTER_SNAPSHOT_TRUSTED"
         # A clean filter rewrites content between the working file and the stored blob, so a
