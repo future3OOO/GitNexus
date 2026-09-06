@@ -1,7 +1,13 @@
-"""Attack on Kotlin indexing through the real CLI from an install made with npm ignore-scripts."""
+"""Attack on Kotlin indexing through the real CLI, with the grammar loaded from its shipped prebuild.
+
+node-gyp-build prefers a compiled build/ over prebuilds/, so the attack first pins down that this
+install has no compiled binding and does have the prebuild for this platform; only then does the
+indexing result say anything about the prebuild.
+"""
 
 from __future__ import annotations
 
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +17,9 @@ from pathlib import Path
 from gitnexus.test.e2e.test_analyze_skill_generation import ENV, PACKAGE, SOURCE_ENTRY
 
 FIXTURE = PACKAGE / "test" / "fixtures" / "lang-resolution" / "kotlin-overload-dispatch"
+GRAMMAR = PACKAGE / "node_modules" / "tree-sitter-kotlin"
+ARCH = {"x86_64": "x64", "AMD64": "x64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine()]
+PREBUILD = GRAMMAR / "prebuilds" / f"{ {'Linux': 'linux', 'Darwin': 'darwin', 'Windows': 'win32'}[platform.system()] }-{ARCH}"
 
 
 class AnalyzeKotlinGrammarTests(unittest.TestCase):
@@ -24,8 +33,10 @@ class AnalyzeKotlinGrammarTests(unittest.TestCase):
         return subprocess.run([*SOURCE_ENTRY, *args], cwd=PACKAGE, text=True, capture_output=True,
                               env={**ENV, "HOME": str(self.home)}, timeout=600)
 
-    def test_analyze_indexes_kotlin_classes_without_install_scripts(self) -> None:
+    def test_analyze_indexes_kotlin_classes_from_the_prebuilt_grammar(self) -> None:
         marker = "KOTLIN_NOT_INDEXED"
+        self.assertFalse((GRAMMAR / "build").exists(), f"{marker}: a compiled build/ would shadow the prebuild")
+        self.assertTrue(list(PREBUILD.glob("*.node")), f"{marker}: no prebuild under {PREBUILD}")
         analyzed = self.cli("analyze", "--skip-git", str(self.repo))
         self.assertEqual(analyzed.returncode, 0, f"analyze failed: {analyzed.stdout[-300:]} {analyzed.stderr[-500:]}")
 
