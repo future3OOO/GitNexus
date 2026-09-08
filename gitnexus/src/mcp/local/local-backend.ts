@@ -2002,9 +2002,8 @@ export class LocalBackend {
       }
     }
 
-    // Every test upstream of any changed symbol, containers included: one multi-seed walk
-    // reaches exactly the union of per-symbol `impact --direction upstream --include-tests`,
-    // and the changed symbols themselves are seeds, never results.
+    // Every test upstream of the changed symbols, containers included. A test that calls a
+    // changed symbol remains impacted even when the test itself changed.
     const { impacted, traversalComplete, edgesIntoSeed } = await this._traverseImpact(
       repo,
       changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
@@ -2014,6 +2013,9 @@ export class LocalBackend {
         relationTypes: DEFAULT_IMPACT_RELATION_TYPES,
         includeTests: true,
         minConfidence: 0,
+        // A changed test that another changed symbol reaches is still impacted by that
+        // symbol; it may appear in both changed_symbols and impacted_tests.
+        reachedSeedsAreResults: true,
       },
     );
     if (!traversalComplete)
@@ -2433,8 +2435,8 @@ export class LocalBackend {
 
   /**
    * Breadth-first walk over CodeRelation edges from one or more seed symbols, one query per
-   * depth. Seeds are visited from the start and never reported, so a multi-seed walk reaches
-   * exactly the union of the single-seed walks at the same depth.
+   * depth. Seeds start visited; detect-changes can also report a given seed reached over a
+   * non-self edge without expanding it again.
    */
   private async _traverseImpact(
     repo: RepoHandle,
@@ -2445,13 +2447,20 @@ export class LocalBackend {
       relationTypes: string[];
       includeTests: boolean;
       minConfidence: number;
+      /** Report a seed the walk reaches from another node (never over a self edge) as a
+       *  result too; a single-seed impact keeps its seed out of its own results. */
+      reachedSeedsAreResults?: boolean;
     },
   ): Promise<{
     impacted: ImpactedNode[];
     traversalComplete: boolean;
     edgesIntoSeed: Map<string, number>;
   }> {
-    const { maxDepth, relationTypes, includeTests, minConfidence } = opts;
+    const { maxDepth, relationTypes, includeTests, minConfidence, reachedSeedsAreResults } = opts;
+    // The seeds as given; a Class's expanded constructor and owning File are walked but are
+    // definition containers, never results, so they stay outside this set.
+    const givenSeeds = new Set(seeds.map((seed) => seed.id).filter(Boolean));
+    const reportedSeeds = new Set<string>();
     const relTypeFilter = relationTypes.map((t) => `'${t}'`).join(', ');
     const confidenceFilter = minConfidence > 0 ? ` AND r.confidence >= ${minConfidence}` : '';
 
@@ -2556,27 +2565,39 @@ export class LocalBackend {
 
           if (!includeTests && isTestFilePath(filePath)) continue;
 
-          if (!visited.has(relId)) {
+          // A node is reported once: when first reached, or, for detect-changes, when it is a
+          // given seed another node reaches (never over a self edge). Only a newly reached node
+          // is expanded; a reached seed's own callers were already the first frontier.
+          const sourceId = String(rel.sourceId ?? rel[0] ?? '');
+          const reachedSeed =
+            reachedSeedsAreResults &&
+            givenSeeds.has(relId) &&
+            relId !== sourceId &&
+            !reportedSeeds.has(relId);
+          if (!reachedSeed && visited.has(relId)) continue;
+          if (reachedSeed) {
+            reportedSeeds.add(relId);
+          } else {
             visited.add(relId);
             nextFrontier.push(relId);
-            const storedConfidence = rel.confidence ?? rel[6];
-            const relationType = rel.relType || rel[5];
-            // Prefer the stored confidence from the graph (set at analysis time);
-            // fall back to the per-type floor for edges without a stored value.
-            const effectiveConfidence =
-              typeof storedConfidence === 'number' && storedConfidence > 0
-                ? storedConfidence
-                : confidenceForRelType(relationType);
-            impacted.push({
-              depth,
-              id: relId,
-              name: rel.name || rel[2],
-              type: rel.type || rel[3],
-              filePath,
-              relationType,
-              confidence: effectiveConfidence,
-            });
           }
+          const storedConfidence = rel.confidence ?? rel[6];
+          const relationType = rel.relType || rel[5];
+          // Prefer the stored confidence from the graph (set at analysis time);
+          // fall back to the per-type floor for edges without a stored value.
+          const effectiveConfidence =
+            typeof storedConfidence === 'number' && storedConfidence > 0
+              ? storedConfidence
+              : confidenceForRelType(relationType);
+          impacted.push({
+            depth,
+            id: relId,
+            name: rel.name || rel[2],
+            type: rel.type || rel[3],
+            filePath,
+            relationType,
+            confidence: effectiveConfidence,
+          });
         }
       } catch (e) {
         logQueryError('impact:depth-traversal', e);
