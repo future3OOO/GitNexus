@@ -2014,6 +2014,9 @@ export class LocalBackend {
         relationTypes: DEFAULT_IMPACT_RELATION_TYPES,
         includeTests: true,
         minConfidence: 0,
+        // A changed test that another changed symbol reaches is still impacted by that
+        // symbol; it may appear in both changed_symbols and impacted_tests.
+        reachedSeedsAreResults: true,
       },
     );
     if (!traversalComplete)
@@ -2445,13 +2448,20 @@ export class LocalBackend {
       relationTypes: string[];
       includeTests: boolean;
       minConfidence: number;
+      /** Report a seed the walk reaches from another node (never over a self edge) as a
+       *  result too; a single-seed impact keeps its seed out of its own results. */
+      reachedSeedsAreResults?: boolean;
     },
   ): Promise<{
     impacted: ImpactedNode[];
     traversalComplete: boolean;
     edgesIntoSeed: Map<string, number>;
   }> {
-    const { maxDepth, relationTypes, includeTests, minConfidence } = opts;
+    const { maxDepth, relationTypes, includeTests, minConfidence, reachedSeedsAreResults } = opts;
+    // The seeds as given; a Class's expanded constructor and owning File are walked but are
+    // definition containers, never results, so they stay outside this set.
+    const givenSeeds = new Set(seeds.map((seed) => seed.id).filter(Boolean));
+    const reportedSeeds = new Set<string>();
     const relTypeFilter = relationTypes.map((t) => `'${t}'`).join(', ');
     const confidenceFilter = minConfidence > 0 ? ` AND r.confidence >= ${minConfidence}` : '';
 
@@ -2555,6 +2565,32 @@ export class LocalBackend {
           }
 
           if (!includeTests && isTestFilePath(filePath)) continue;
+
+          const sourceId = String(rel.sourceId ?? rel[0] ?? '');
+          if (
+            reachedSeedsAreResults &&
+            givenSeeds.has(relId) &&
+            relId !== sourceId &&
+            !reportedSeeds.has(relId)
+          ) {
+            // Already a seed, so its own callers are in the walk; report it, do not re-expand it.
+            reportedSeeds.add(relId);
+            const storedConfidence = rel.confidence ?? rel[6];
+            const relationType = rel.relType || rel[5];
+            impacted.push({
+              depth,
+              id: relId,
+              name: rel.name || rel[2],
+              type: rel.type || rel[3],
+              filePath,
+              relationType,
+              confidence:
+                typeof storedConfidence === 'number' && storedConfidence > 0
+                  ? storedConfidence
+                  : confidenceForRelType(relationType),
+            });
+            continue;
+          }
 
           if (!visited.has(relId)) {
             visited.add(relId);

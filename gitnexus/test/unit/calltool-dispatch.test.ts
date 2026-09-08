@@ -781,3 +781,73 @@ describe('cypher result formatting', () => {
     expect(result.error).toContain('Syntax error');
   });
 });
+
+// ─── _traverseImpact: a seed reached from another seed ───────────────
+
+describe('LocalBackend._traverseImpact seeds reached from another seed', () => {
+  let backend: LocalBackend;
+  const repo = { id: 'test-project' } as any;
+  const P = 'Function:app/core.py:compute';
+  const T = 'Function:tests/test_core.py:CoreTests.test_zero';
+  const H = 'Function:app/helper.py:h';
+  const seeds = [
+    { id: P, type: 'Function' },
+    { id: T, type: 'Function' },
+  ];
+  // Depth-1 rows: the changed test T calls the changed production symbol P; T also calls
+  // itself (a self edge, never a result); an unchanged helper H calls P.
+  const rows = [
+    {
+      sourceId: P,
+      id: T,
+      name: 'test_zero',
+      type: 'Function',
+      filePath: 'tests/test_core.py',
+      relType: 'CALLS',
+      confidence: 1,
+    },
+    {
+      sourceId: T,
+      id: T,
+      name: 'test_zero',
+      type: 'Function',
+      filePath: 'tests/test_core.py',
+      relType: 'CALLS',
+      confidence: 1,
+    },
+    {
+      sourceId: P,
+      id: H,
+      name: 'h',
+      type: 'Function',
+      filePath: 'app/helper.py',
+      relType: 'CALLS',
+      confidence: 1,
+    },
+  ];
+  const opts = { maxDepth: 2, relationTypes: ['CALLS'], includeTests: true, minConfidence: 0 };
+
+  beforeEach(() => {
+    backend = new LocalBackend();
+    vi.clearAllMocks();
+  });
+
+  it('reports a changed test reached from a changed symbol once, without re-expanding it, when asked', async () => {
+    (executeQuery as any).mockResolvedValueOnce(rows);
+    const { impacted } = await (backend as any)._traverseImpact(repo, seeds, 'upstream', {
+      ...opts,
+      reachedSeedsAreResults: true,
+    });
+    expect(impacted.map((n: any) => n.id)).toEqual([T, H]);
+    // The next depth walks only the new caller: the reached seed's callers were the first frontier.
+    const depthTwo = (executeQuery as any).mock.calls[1][1] as string;
+    expect(depthTwo).toContain(H);
+    expect(depthTwo).not.toContain(T);
+  });
+
+  it('keeps seeds out of results by default (the impact tool contract)', async () => {
+    (executeQuery as any).mockResolvedValueOnce(rows);
+    const { impacted } = await (backend as any)._traverseImpact(repo, seeds, 'upstream', opts);
+    expect(impacted.map((n: any) => n.id)).toEqual([H]);
+  });
+});
