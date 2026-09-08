@@ -1379,11 +1379,11 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         self.assertEqual({item["name"] for item in payload["impacted_tests"]}, {"test_mixed"},
                          marker + ": " + json.dumps(payload["impacted_tests"]))
 
-    def test_a_changed_test_caller_is_a_changed_symbol_not_an_impacted_test(self) -> None:
+    def test_a_changed_test_caller_is_a_changed_symbol_and_an_impacted_test(self) -> None:
         marker = "CHANGED_TEST_CALLER_MISREAD"
-        # Editing a function and its only test caller together: the test is a seed, so it is
-        # reported in changed_symbols and never in impacted_tests. A consumer must read the
-        # empty set against changed_symbols, which is what the tool description now says.
+        # Editing a function and its only test caller together: the test is a seed that the
+        # walk from solo also reaches, so it is reported in changed_symbols and in
+        # impacted_tests, which is what the tool description says.
         self.commit_and_sync({
             "solo.py": "def solo():\n    return 1\n",
             "tests/test_solo.py": "from solo import solo\n\n\ndef test_solo():\n    assert solo() == 1\n",
@@ -1396,8 +1396,8 @@ class WorktreeDetectChangesTests(unittest.TestCase):
 
         counts = self.incoming(payload, marker)
         self.assertGreaterEqual(counts.get("solo", 0), 1, marker + ": " + json.dumps(payload["changed_symbols"]))
-        self.assertEqual(payload["impacted_tests"], [],
-                         marker + ": a changed test is a seed, never a result: " + json.dumps(payload["impacted_tests"]))
+        self.assertEqual([item["id"] for item in payload["impacted_tests"]], ["Function:tests/test_solo.py:test_solo"],
+                         marker + ": a changed test reached from the changed symbol stays impacted: " + json.dumps(payload["impacted_tests"]))
         self.assertIn("test_solo", self.names(payload),
                       marker + ": the changed test must be visible in changed_symbols: " + json.dumps(payload["changed_symbols"]))
 
