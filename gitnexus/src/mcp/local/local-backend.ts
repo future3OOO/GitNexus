@@ -2003,8 +2003,9 @@ export class LocalBackend {
     }
 
     // Every test upstream of any changed symbol, containers included: one multi-seed walk
-    // reaches exactly the union of per-symbol `impact --direction upstream --include-tests`,
-    // and the changed symbols themselves are seeds, never results.
+    // over the union of per-symbol `impact --direction upstream --include-tests`. A changed
+    // symbol another changed symbol reaches is reported as well (a changed test called by a
+    // changed function stays impacted); no symbol is a result of its own walk.
     const { impacted, traversalComplete, edgesIntoSeed } = await this._traverseImpact(
       repo,
       changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
@@ -2566,53 +2567,39 @@ export class LocalBackend {
 
           if (!includeTests && isTestFilePath(filePath)) continue;
 
+          // A node is reported once: when first reached, or, for detect-changes, when it is a
+          // given seed another node reaches (never over a self edge). Only a newly reached node
+          // is expanded; a reached seed's own callers were already the first frontier.
           const sourceId = String(rel.sourceId ?? rel[0] ?? '');
-          if (
+          const reachedSeed =
             reachedSeedsAreResults &&
             givenSeeds.has(relId) &&
             relId !== sourceId &&
-            !reportedSeeds.has(relId)
-          ) {
-            // Already a seed, so its own callers are in the walk; report it, do not re-expand it.
+            !reportedSeeds.has(relId);
+          if (!reachedSeed && visited.has(relId)) continue;
+          if (reachedSeed) {
             reportedSeeds.add(relId);
-            const storedConfidence = rel.confidence ?? rel[6];
-            const relationType = rel.relType || rel[5];
-            impacted.push({
-              depth,
-              id: relId,
-              name: rel.name || rel[2],
-              type: rel.type || rel[3],
-              filePath,
-              relationType,
-              confidence:
-                typeof storedConfidence === 'number' && storedConfidence > 0
-                  ? storedConfidence
-                  : confidenceForRelType(relationType),
-            });
-            continue;
-          }
-
-          if (!visited.has(relId)) {
+          } else {
             visited.add(relId);
             nextFrontier.push(relId);
-            const storedConfidence = rel.confidence ?? rel[6];
-            const relationType = rel.relType || rel[5];
-            // Prefer the stored confidence from the graph (set at analysis time);
-            // fall back to the per-type floor for edges without a stored value.
-            const effectiveConfidence =
-              typeof storedConfidence === 'number' && storedConfidence > 0
-                ? storedConfidence
-                : confidenceForRelType(relationType);
-            impacted.push({
-              depth,
-              id: relId,
-              name: rel.name || rel[2],
-              type: rel.type || rel[3],
-              filePath,
-              relationType,
-              confidence: effectiveConfidence,
-            });
           }
+          const storedConfidence = rel.confidence ?? rel[6];
+          const relationType = rel.relType || rel[5];
+          // Prefer the stored confidence from the graph (set at analysis time);
+          // fall back to the per-type floor for edges without a stored value.
+          const effectiveConfidence =
+            typeof storedConfidence === 'number' && storedConfidence > 0
+              ? storedConfidence
+              : confidenceForRelType(relationType);
+          impacted.push({
+            depth,
+            id: relId,
+            name: rel.name || rel[2],
+            type: rel.type || rel[3],
+            filePath,
+            relationType,
+            confidence: effectiveConfidence,
+          });
         }
       } catch (e) {
         logQueryError('impact:depth-traversal', e);
