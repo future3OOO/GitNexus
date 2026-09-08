@@ -2002,10 +2002,8 @@ export class LocalBackend {
       }
     }
 
-    // Every test upstream of any changed symbol, containers included: one multi-seed walk
-    // over the union of per-symbol `impact --direction upstream --include-tests`. A changed
-    // symbol another changed symbol reaches is reported as well (a changed test called by a
-    // changed function stays impacted); no symbol is a result of its own walk.
+    // Every test upstream of the changed symbols, containers included. A test that calls a
+    // changed symbol remains impacted even when the test itself changed.
     const { impacted, traversalComplete, edgesIntoSeed } = await this._traverseImpact(
       repo,
       changedSymbols.map((sym) => ({ id: String(sym.id), type: String(sym.type) })),
@@ -2437,8 +2435,8 @@ export class LocalBackend {
 
   /**
    * Breadth-first walk over CodeRelation edges from one or more seed symbols, one query per
-   * depth. Seeds are visited from the start and never reported, so a multi-seed walk reaches
-   * exactly the union of the single-seed walks at the same depth.
+   * depth. Seeds start visited; detect-changes can also report a given seed reached over a
+   * non-self edge without expanding it again.
    */
   private async _traverseImpact(
     repo: RepoHandle,
