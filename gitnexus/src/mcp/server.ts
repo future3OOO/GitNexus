@@ -70,9 +70,10 @@ async function boundedResponse(toolName: string, text: string): Promise<string> 
 }
 
 async function retain(dir: string, file: string, text: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700);
   const tmp = `${file}.${randomUUID()}.tmp`;
-  await fs.writeFile(tmp, text);
+  await fs.writeFile(tmp, text, { mode: 0o600 });
   await fs.rename(tmp, file);
   const entries = await Promise.all(
     (await fs.readdir(dir)).map(async (name) => ({
@@ -192,16 +193,13 @@ export function createMCPServer(backend: LocalBackend): Server {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      const text =
+        resultText === undefined
+          ? `Error: ${message}`
+          : `Error: ${name} produced ${Buffer.byteLength(resultText)} bytes, over the ${MAX_RESPONSE_BYTES}-byte reply bound, and the complete result could not be retained: ${message}`;
       return {
-        content: [
-          {
-            type: 'text',
-            text:
-              resultText === undefined
-                ? `Error: ${message}`
-                : `Error: ${name} produced ${Buffer.byteLength(resultText)} bytes, over the ${MAX_RESPONSE_BYTES}-byte reply bound, and the complete result could not be retained: ${message}`,
-          },
-        ],
+        // A thrown message can echo caller input; MAX_RESPONSE_BYTES/4 characters never exceed the byte bound.
+        content: [{ type: 'text', text: text.slice(0, MAX_RESPONSE_BYTES / 4) }],
         isError: true,
       };
     }

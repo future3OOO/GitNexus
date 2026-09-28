@@ -352,6 +352,7 @@ class McpCypherIsolationTests(unittest.TestCase):
 
     def test_large_cypher_result_is_bounded_and_retained(self) -> None:
         marker = "LARGE_RESULT_FLOODED"
+        self.results_dir().mkdir(mode=0o755)  # a results directory left by an earlier run must be made private too
         client = self.client()
         head, path = self.bounded(client.text("cypher", {"repo": REPO, "query": EDGES}, timeout=180), marker)
         self.assertIn('"row_count": 1500', head, marker + ": the row count is not visible ahead of the table")
@@ -359,6 +360,8 @@ class McpCypherIsolationTests(unittest.TestCase):
         full = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(full["row_count"], 1500, marker + ": retained result incomplete")
         self.assertGreater(len(full["markdown"]), 65536, marker + " (retained result smaller than one pipe buffer)")
+        self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700, "RETAINED_RESULT_WORLD_READABLE: a pre-existing results directory was left shared")
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600, "RETAINED_RESULT_WORLD_READABLE")
         self.assertIn("300", (client.call("cypher", {"repo": REPO, "query": COUNT}) or {}).get("markdown", ""), marker + " (server unresponsive after the large result)")
 
     def test_large_impact_result_is_bounded_and_retained(self) -> None:
@@ -389,6 +392,13 @@ class McpCypherIsolationTests(unittest.TestCase):
         head, path = self.bounded(self.client().text("cypher", {"repo": REPO, "query": 'RETURN to_int64("' + "x" * 20000 + '")'}), marker)
         self.assertEqual(head, "{", marker + f": {head[:80]!r}")
         self.assertIn("error", json.loads(path.read_text(encoding="utf-8")), marker + ": retained error incomplete")
+
+    def test_thrown_error_stays_bounded(self) -> None:
+        marker = "THROWN_ERROR_FLOODED"
+        response = self.client().request("tools/call", {"name": "x" * 20000, "arguments": {"repo": REPO}})
+        self.assertIsNotNone(response, marker + " (no response)")
+        text = response["result"]["content"][0]["text"]
+        self.assertEqual((response["result"].get("isError"), text.startswith("Error: Unknown tool: x"), len(text.encode()) <= MAX_RESPONSE_BYTES), (True, True, True), marker + f": {len(text.encode())} bytes {text[:60]!r}")
 
     def test_small_result_is_the_plain_result(self) -> None:
         marker = "SMALL_RESULT_DECORATED"
