@@ -198,7 +198,7 @@ describe('LocalBackend.callTool', () => {
     const result = await backend.callTool('cypher', {
       query: 'MATCH (n:Function) RETURN n.name AS name, n.filePath AS filePath LIMIT 5',
     });
-    // formatCypherAsMarkdown returns { markdown, row_count } for tabular results
+    // formatCypherAsMarkdown returns { row_count, markdown } for tabular results
     expect(result).toHaveProperty('markdown');
     expect(result).toHaveProperty('row_count');
     expect(result.row_count).toBe(1);

@@ -376,6 +376,26 @@ class DetectChangesCliTests(unittest.TestCase):
         self.assertIsNotNone(mcp, marker + ": the MCP server gave no answer")
         self.assertEqual(normalized(cli), normalized(mcp), marker)
 
+    def test_a_bounded_mcp_reply_keeps_the_coverage_verdict_visible(self) -> None:
+        # #27: a large reply is cut to 16 KB; the coverage verdict must not fall behind the cut while the risk verdict shows.
+        marker = "COVERAGE_CAVEAT_HIDDEN"
+        wide = "".join(f"def fn_{i}():\n    return {i}\n\n\n" for i in range(200))
+        (self.repo / "wide.py").write_text(wide, encoding="utf-8")
+        self.git("add", "wide.py")
+        self.git("commit", "-q", "-m", "wide")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+        (self.repo / "wide.py").write_text(wide.replace("return", "return 1 +"), encoding="utf-8")
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+        text = client.text("detect_changes", {"repo": str(self.repo), "scope": "unstaged"})
+        self.assertLessEqual(len(text.encode()), 16384, marker + f": {len(text.encode())} bytes reached the agent")
+        self.assertIn("[gitnexus] bounded:", text, marker + ": the reply was not bounded, so the attack did not reach the cut")
+        head = text[: text.rindex("\n[gitnexus] bounded:")]
+        self.assertIn('"analysis"', head, marker + ": the coverage verdict fell behind the cut: " + head[:300])
+        self.assertLess(head.index('"analysis"'), head.index('"changed_symbols"'), marker + ": analysis is listed after the long symbol list")
+        self.assertIn('"status"', head[head.index('"analysis"'):], marker + ": analysis.status is not visible")
+
 
 SERVICE = (
     "class Service:\n"

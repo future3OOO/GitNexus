@@ -3,11 +3,10 @@
  *
  * Tests: createMCPServer from server.ts
  * - Server creation returns a Server instance
- * - Tool handler wraps backend.callTool and appends hints
+ * - Tool handler wraps backend.callTool
  * - Tool handler catches errors and returns isError: true
  * - Resource handlers delegate to resources.ts functions
  * - Prompt handlers return expected prompts
- * - Next-step hints cover all tool names
  *
  * NOTE: We test the server handler logic by calling the request handlers
  * directly through the MCP Server's handler dispatch.
@@ -51,26 +50,6 @@ describe('createMCPServer', () => {
     const server = createMCPServer(backend);
     // The server has registered handlers — verify it was created without errors
     expect(server).toBeTruthy();
-  });
-});
-
-// ─── getNextStepHint (tested indirectly via server tool handler) ──────
-
-describe('getNextStepHint (via tool call response)', () => {
-  // We test hints by calling the server's tool handler indirectly.
-  // Since createMCPServer registers handlers on the Server, we verify
-  // hints are appended by checking the tool response format.
-
-  it('query tool response includes hint about context', async () => {
-    const backend = createMockBackend({
-      callTool: vi.fn().mockResolvedValue({ processes: [], definitions: [] }),
-    });
-    const server = createMCPServer(backend);
-
-    // We can't easily call handlers directly on the MCP Server,
-    // so we verify the handler was registered by creating the server without error.
-    // The actual hint logic is tested via the integration path.
-    expect(backend.callTool).not.toHaveBeenCalled(); // not called until request
   });
 });
 
