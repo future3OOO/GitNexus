@@ -77,7 +77,10 @@ async function retain(dir: string, file: string, text: string): Promise<void> {
   const entries = await Promise.all(
     (await fs.readdir(dir)).map(async (name) => ({
       name,
-      mtime: await fs.stat(path.join(dir, name)).then((s) => s.mtimeMs, () => 0),
+      mtime: await fs.stat(path.join(dir, name)).then(
+        (s) => s.mtimeMs,
+        () => 0,
+      ),
     })),
   );
   entries.sort((a, b) => b.mtime - a.mtime);
