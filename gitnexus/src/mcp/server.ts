@@ -11,7 +11,7 @@
  * Resources: repos, repo/{name}/context, repo/{name}/clusters, ...
  */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import { createRequire } from 'module';
 import * as path from 'node:path';
@@ -36,45 +36,40 @@ import { getGlobalDir } from '../storage/repo-manager.js';
  * Bound what a tool reply puts into the agent's context.
  *
  * A reply over MAX_RESPONSE_BYTES is cut at a line boundary (a newline, or the
- * JSON-escaped newline inside cypher's markdown string) and ends with a footer
- * naming how much is shown and the file holding the complete text. The file is
- * content-addressed under ~/.gitnexus/results, published by rename so a
- * reference never names a partial write, and the newest 50 entries are kept.
+ * JSON-escaped newline inside cypher's markdown string) — or mid-line when that
+ * would show less than half the budget, as in a one-line error or one huge row — and ends
+ * with a footer naming how much is shown and the file holding the complete text.
+ * Every reply gets its own file under ~/.gitnexus/results, written once and never
+ * renamed, so a prune in any process sharing the directory can only remove entries
+ * older than the reply's; the newest RETAINED_RESULTS entries are kept (ties with
+ * the last kept entry included) and the call verifies its file survived before
+ * answering.
  */
 const MAX_RESPONSE_BYTES = 16384;
 const RETAINED_RESULTS = 50;
-// Publication and pruning run one at a time: a prune working from a listing taken
-// before another call refreshed a reference must not delete that reference.
-let retention: Promise<unknown> = Promise.resolve();
 
 async function boundedResponse(toolName: string, text: string): Promise<string> {
-  const total = Buffer.byteLength(text);
-  if (total <= MAX_RESPONSE_BYTES) return text;
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_RESPONSE_BYTES) return text;
 
   const dir = path.join(getGlobalDir(), 'results');
   const file = path.join(
     dir,
-    `${toolName}-${createHash('sha1').update(text).digest('hex').slice(0, 12)}.json`,
+    `${toolName}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.json`,
   );
   const lines = text.split(/\n|\\n/).length;
   const footer = (shown: number) =>
-    `\n[gitnexus] bounded: ${shown} of ${lines} lines (${total} bytes). Complete result: ${file}`;
-  const head = Buffer.from(text).subarray(0, MAX_RESPONSE_BYTES - Buffer.byteLength(footer(lines)));
-  const cut = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('\\n'));
-  const visible = head.subarray(0, cut > 0 ? cut : head.length).toString();
+    `\n[gitnexus] bounded: ${shown} of ${lines} lines (${bytes.length} bytes). Complete result: ${file}`;
+  const budget = MAX_RESPONSE_BYTES - Buffer.byteLength(footer(lines));
+  const head = bytes.subarray(0, budget);
+  const lineEnd = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('\\n'));
+  let end = lineEnd > budget / 2 ? lineEnd : budget; // a line longer than half the budget is cut mid-line
+  while ((bytes[end] & 0xc0) === 0x80) end--; // never split a multi-byte character
+  const visible = bytes.subarray(0, end).toString();
 
-  const published = retention.then(() => retain(dir, file, text));
-  retention = published.catch(() => undefined);
-  await published;
-  return visible + footer(visible.split(/\n|\\n/).length);
-}
-
-async function retain(dir: string, file: string, text: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.chmod(dir, 0o700);
-  const tmp = `${file}.${randomUUID()}.tmp`;
-  await fs.writeFile(tmp, text, { mode: 0o600 });
-  await fs.rename(tmp, file);
+  await fs.writeFile(file, text, { mode: 0o600 });
   const entries = await Promise.all(
     (await fs.readdir(dir)).map(async (name) => ({
       name,
@@ -85,9 +80,14 @@ async function retain(dir: string, file: string, text: string): Promise<void> {
     })),
   );
   entries.sort((a, b) => b.mtime - a.mtime);
+  const oldest = entries[RETAINED_RESULTS - 1]?.mtime ?? 0;
   await Promise.all(
-    entries.slice(RETAINED_RESULTS).map((e) => fs.rm(path.join(dir, e.name), { force: true })),
+    entries
+      .filter((e) => e.mtime < oldest)
+      .map((e) => fs.rm(path.join(dir, e.name), { force: true })),
   );
+  await fs.access(file);
+  return visible + footer(visible.split(/\n|\\n/).length);
 }
 
 /**

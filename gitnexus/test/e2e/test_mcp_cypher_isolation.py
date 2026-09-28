@@ -343,7 +343,9 @@ class McpCypherIsolationTests(unittest.TestCase):
         full = path.read_text(encoding="utf-8")
         head = text[: footer.start()]
         self.assertTrue(full.startswith(head), marker + ": the visible head is not a prefix of the retained result")
-        self.assertRegex(full[len(head):], r"^(\n|\\n)", marker + ": the cut is not at a line boundary")
+        # cut at a line boundary, or mid-line when the last boundary sat in the first half of the head
+        self.assertTrue(re.match(r"\n|\\n", full[len(head):]) or len(head.encode()) > MAX_RESPONSE_BYTES // 2 - 200,
+                        marker + f": the cut is neither at a line boundary nor near the budget ({len(head.encode())} bytes)")
         self.assertEqual(int(footer.group(3)), len(full.encode()), marker + ": the footer misstates the total size")
         return head, path
 
@@ -356,7 +358,7 @@ class McpCypherIsolationTests(unittest.TestCase):
         client = self.client()
         head, path = self.bounded(client.text("cypher", {"repo": REPO, "query": EDGES}, timeout=180), marker)
         self.assertIn('"row_count": 1500', head, marker + ": the row count is not visible ahead of the table")
-        self.assertTrue(head.endswith(" |"), marker + f": the last visible row is cut mid-row: {head[-80:]!r}")
+        self.assertGreater(len(head.encode()), MAX_RESPONSE_BYTES // 2, marker + ": less than half the bound is visible")
         full = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(full["row_count"], 1500, marker + ": retained result incomplete")
         self.assertGreater(len(full["markdown"]), 65536, marker + " (retained result smaller than one pipe buffer)")
@@ -386,12 +388,24 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertTrue(head.startswith('{\n  "error": "Parser exception'), marker + f": error meaning not visible: {head[:120]!r}")
         self.assertIn("Parser exception", json.loads(path.read_text(encoding="utf-8"))["error"], marker + ": retained error incomplete")
 
-    def test_single_line_oversized_error_stays_bounded(self) -> None:
-        # Known limit: with no line boundary inside the head only "{" is visible; the reply is still bounded and retained.
-        marker = "SINGLE_LINE_ERROR_FLOODED"
+    def test_single_line_oversized_error_keeps_its_meaning(self) -> None:
+        # With no line boundary inside the head, the cut must still show the error key and the message head.
+        marker = "ERROR_HEAD_HIDDEN"
         head, path = self.bounded(self.client().text("cypher", {"repo": REPO, "query": 'RETURN to_int64("' + "x" * 20000 + '")'}), marker)
-        self.assertEqual(head, "{", marker + f": {head[:80]!r}")
-        self.assertIn("error", json.loads(path.read_text(encoding="utf-8")), marker + ": retained error incomplete")
+        self.assertTrue(head.startswith('{\n  "error": "Conversion exception'), marker + f": {head[:80]!r}")
+        self.assertGreater(len(head.encode()), 8192, marker + f": only {len(head.encode())} bytes of the error are visible")
+        self.assertIn("Conversion exception", json.loads(path.read_text(encoding="utf-8"))["error"], marker + ": retained error incomplete")
+
+    def test_mid_line_cut_never_splits_a_character(self) -> None:
+        marker = "CHARACTER_SPLIT_AT_CUT"
+        text = self.client(DIST_ENTRY).text("cypher", {"repo": REPO, "query": 'RETURN to_int64("' + "日" * 20000 + '")'})
+        head = self.bounded(text, marker)[0]
+        self.assertEqual(("\ufffd" in text, head.endswith("日")), (False, True), marker + f": {head[-12:]!r}")
+
+    def test_one_row_result_shows_its_row(self) -> None:
+        marker = "ROW_HIDDEN_BEHIND_CUT"
+        head = self.bounded(self.client().text("cypher", {"repo": REPO, "query": "MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN collect(a.id+'->'+b.id) AS edges"}), marker)[0]
+        self.assertEqual((len(head.encode()) > MAX_RESPONSE_BYTES // 2, "->" in head), (True, True), marker + f": {len(head.encode())} bytes visible")
 
     def test_thrown_error_stays_bounded(self) -> None:
         marker = "THROWN_ERROR_FLOODED"
@@ -431,68 +445,95 @@ class McpCypherIsolationTests(unittest.TestCase):
         self.assertIn(str(home / ".gitnexus" / "results"), text, marker + f": failing location not named: {text!r}")
         self.assertNotIn("| f", text, marker + ": table rows leaked into the error")
 
-    def test_retained_results_are_pruned_to_fifty(self) -> None:
-        marker = "RETENTION_UNBOUNDED"
+    def test_references_survive_a_second_server_sharing_the_home(self) -> None:
+        # Every MCP process sharing the HOME prunes the same directory. A returned reference must survive
+        # the other server's publications until 50 newer entries exist, whatever either server repeats.
+        marker = "FLEET_REFERENCE_PRUNED"
         results = self.results_dir()
-        client = self.client()
-        first = self.bounded(self.distinct_large(client, 0), marker)[1]
-        second = self.bounded(self.distinct_large(client, 1), marker)[1]
-        for k in range(2, 50):
-            self.distinct_large(client, k)
-        self.assertEqual(len(list(results.iterdir())), 50, marker)
-        self.assertEqual(self.bounded(self.distinct_large(client, 0), marker)[1], first, marker + ": an identical result was retained under a new reference")
-        self.assertEqual(len(list(results.iterdir())), 50, marker + ": an identical result added a file")
-        newest = self.bounded(self.distinct_large(client, 50), marker)[1]
-        entries = set(results.iterdir())
-        self.assertEqual(len(entries), 50, marker + f": {len(entries)} entries")
-        self.assertEqual((first in entries, second in entries, newest in entries), (True, False, True), marker + ": eviction is not oldest-first with refresh on repeat")
-
-    def test_reference_survives_identical_repeat_and_leftovers(self) -> None:
-        marker = "REFERENCE_UNSTABLE"
-        results = self.results_dir()
-        client = self.client()
-        path = self.bounded(self.distinct_large(client, 0), marker)[1]
-        with path.open("rb") as held:
-            before = os.fstat(held.fileno()).st_ino
-            self.assertEqual(self.bounded(self.distinct_large(client, 0), marker)[1], path, marker)
-            self.assertNotEqual(os.stat(path).st_ino, before, marker + ": an identical repeat rewrote the inode a reader may hold")
-            self.assertEqual(held.read(), path.read_bytes(), marker + ": the held reference and the path differ")
-        self.assertEqual([e.name for e in results.iterdir() if e.name.endswith(".tmp")], [], marker + ": temporary left behind")
-        leftover = results / "planted.json.deadbeef.tmp"
-        leftover.write_text('{"row_count": 1500, "markdown": "| a.id |', encoding="utf-8")
-        os.utime(leftover, (0, 0))
-        fresh = self.client()
-        published = {self.bounded(self.distinct_large(fresh, k), marker)[1] for k in range(100, 150)}
-        self.assertNotIn(leftover, published, marker + ": an interrupted write was returned as evidence")
-        entries = set(results.iterdir())
-        self.assertEqual((len(entries), leftover in entries, published <= entries), (50, False, True), marker + f": {sorted(e.name for e in entries)[:5]}")
-
-    def test_refreshed_reference_survives_a_concurrent_prune(self) -> None:
-        # At the quota, a distinct call prunes from its own directory listing while a slower identical
-        # repeat refreshes the oldest reference after that listing was taken; the prune must not delete
-        # the refreshed file. The natural window between listing and removal is about a millisecond, so
-        # RED was established with that window widened in a disposable built copy; the probe is retained
-        # so the ordering guarantee stays exercised through the real server.
-        marker = "REFRESHED_REFERENCE_PRUNED"
-        self.results_dir()
-        client = self.client(DIST_ENTRY)
-        slow = ("MATCH (a:Function)-[r:CodeRelation]->(b:Function), (c:Function) WHERE c.startLine < 3 "
-                "RETURN a.id, b.id, {} AS k ORDER BY a.id, b.id, c.startLine")
-        oldest = [(k, self.bounded(client.text("cypher", {"repo": REPO, "query": slow.format(k)}), marker)[1]) for k in range(400, 450)]
-        for k in range(450, 460):
-            ka, path = oldest.pop(0)
-            distinct = client.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": f"MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN a.id, b.id, {k} AS k"}})
-            repeat = client.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": slow.format(ka)}})
-            for key, request_id in ((k, distinct), (ka, repeat)):
+        first, second = self.client(DIST_ENTRY), self.client(DIST_ENTRY)
+        query = "MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN a.id, b.id, {} AS k"
+        refs = [(k, self.bounded(self.distinct_large(first, k), marker)[1]) for k in range(700, 750)]
+        k = 750
+        for width in [4] * 20 + [24] * 3:
+            oldest = min(refs, key=lambda entry: entry[1].stat().st_mtime if entry[1].exists() else 0)
+            repeat = first.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": query.format(oldest[0])}})
+            burst = [(k + i, second.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": query.format(k + i)}})) for i in range(width)]
+            k += width
+            for key, request_id, client in [(oldest[0], repeat, first)] + [(key, request_id, second) for key, request_id in burst]:
                 response = client.receive(request_id)
                 self.assertIsNotNone(response, marker + " (no response)")
                 self.assertFalse(response["result"].get("isError"), marker + f": {response['result']['content'][0]['text'][:200]}")
-                oldest.append((key, self.bounded(response["result"]["content"][0]["text"], marker)[1]))
-            self.assertTrue(path.is_file(), marker + f": the reference refreshed for k={ka} was pruned by a concurrent call")
-            oldest.sort(key=lambda entry: entry[1].stat().st_mtime if entry[1].exists() else 0)
+                refs.append((key, self.bounded(response["result"]["content"][0]["text"], marker)[1]))
+                # A path another process may be pruning is never rewritten: a repeat gets its own file.
+                self.assertNotEqual(refs[-1][1], oldest[1], marker + ": a repeated result reused an existing path")
+            missing = [entry for entry in refs[-(width + 1):] if not entry[1].is_file()]
+            self.assertEqual(missing, [], marker + f": a reference returned this round was pruned: {missing[:3]}")
+            refs = sorted(refs, key=lambda entry: entry[1].stat().st_mtime if entry[1].exists() else 0)[-50:]
+        self.assertLessEqual(len(list(results.iterdir())), 50, marker + ": more than 50 entries after the last prune")
+
+    def test_evicted_before_reply_is_a_bounded_error(self) -> None:
+        # 50 entries newer than the call's own file at its prune (what a clock-skewed writer leaves) must not
+        # yield a reference to a file the call itself just evicted.
+        marker = "STALE_REFERENCE_RETURNED"
+        results = self.results_dir()
+        results.mkdir()
+        future = time.time() + 3600
+        for i in range(50):
+            planted = results / f"cypher-future-{i}.json"
+            planted.write_text("{}", encoding="utf-8")
+            os.utime(planted, (future, future))
+        client = self.client()
+        response = client.request("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": EDGES}}, timeout=180)
+        self.assertIsNotNone(response, marker + " (no response)")
+        text = response["result"]["content"][0]["text"]
+        self.assertEqual((response["result"].get("isError"), "[gitnexus] bounded" in text, "| f" in text), (True, False, False), marker + f": {text[:200]!r}")
+        self.assertLess(len(text.encode()), 1024, marker + f": {len(text.encode())} bytes")
+        self.assertRegex(text, r"\d{5,} bytes", marker + ": size not named")
+        self.assertEqual(len(list(results.iterdir())), 50, marker + ": the evicted file or the planted entries changed")
+        for planted in results.iterdir():
+            planted.unlink()
+        self.bounded(client.text("cypher", {"repo": REPO, "query": EDGES}, timeout=180), marker + " (after clearing)")
+
+    def test_tied_timestamps_are_not_evicted_early(self) -> None:
+        marker = "TIED_ENTRY_EVICTED_EARLY"
+        results = self.results_dir()
+        client = self.client()
+        reference = self.bounded(self.distinct_large(client, 0), marker)[1]
+        tied = [reference] + [results / f"cypher-tied-{i}.json" for i in range(10)]
+        for entry in tied[1:]:
+            entry.write_text("{}", encoding="utf-8")
+        for entry in tied:
+            os.utime(entry, (1000, 1000))
+        for k in range(1, 50):
+            self.distinct_large(client, k)
+        self.assertEqual([entry for entry in tied if not entry.exists()], [], marker + ": a tied entry was evicted by 49 newer results")
+        self.distinct_large(client, 50)
+        self.assertEqual(([entry for entry in tied if entry.exists()], len(list(results.iterdir()))), ([], 50), marker + ": tied entries not evicted together by the 50th")
+
+    def test_reference_survives_a_killed_server_and_its_residue(self) -> None:
+        marker = "REFERENCE_LOST_ACROSS_RESTART"
+        results = self.results_dir()
+        killed = self.client(DIST_ENTRY)
+        reference = self.bounded(self.distinct_large(killed, 0), marker)[1]
+        before = set(results.iterdir())
+        interrupted = killed.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": EDGES}})
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and set(results.iterdir()) == before:
+            time.sleep(0.001)
+        killed.process.kill()  # SIGKILL while the 1.1 MB result is being retained
+        self.assertIsNone(killed.receive(interrupted, timeout=10), marker + ": missed the interruption window; the request was answered")
+        residue = set(results.iterdir()) - before
+        self.assertEqual(len(residue), 1, marker + f": expected one residue entry, saw {residue}")
+        fresh = self.client(DIST_ENTRY)
+        published = [self.bounded(self.distinct_large(fresh, k), marker)[1] for k in range(1, 49)]
+        self.assertTrue(reference.is_file(), marker + ": the reference did not survive 48 newer results plus the residue")
+        published.append(self.bounded(self.distinct_large(fresh, 49), marker)[1])
+        self.assertFalse(reference.exists(), marker + ": the 50th newer entry (48 + residue + 1) did not evict the reference")
+        self.assertEqual([p for p in published if not p.is_file()], [], marker + ": a fresh server's reference is missing")
+        self.assertEqual(residue & set(published), set(), marker + ": residue was returned as evidence")
 
     def test_overlapping_large_calls_each_retained(self) -> None:
-        # Bursts make one call's rename or prune race another call's prune listing.
+        # Bursts make one call's write or prune race another call's prune listing.
         marker = "OVERLAP_RETENTION_BROKEN"
         client = self.client()
         query = "MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN a.id, b.id, {} AS k"

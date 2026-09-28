@@ -110,7 +110,7 @@ EXAMPLES:
 • Trace a process:
   MATCH (s)-[r:CodeRelation {type: 'STEP_IN_PROCESS'}]->(p:Process) WHERE p.heuristicLabel = "UserLogin" RETURN s.name, r.step ORDER BY r.step
 
-OUTPUT: Returns { row_count, markdown } — results formatted as a Markdown table. A reply over 16 KB is cut at a line and ends with a footer naming the file holding the complete result; read that file rather than re-running the query.
+OUTPUT: Returns { row_count, markdown } — results formatted as a Markdown table. A reply over 16 KB is cut and ends with a footer naming the file holding the complete result; read that file rather than re-running the query.
 
 TIPS:
 - All relationships use single CodeRelation table — filter with {type: 'CALLS'} etc.
