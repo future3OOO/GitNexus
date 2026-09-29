@@ -512,16 +512,22 @@ class McpCypherIsolationTests(unittest.TestCase):
 
     def test_reference_survives_a_killed_server_and_its_residue(self) -> None:
         marker = "REFERENCE_LOST_ACROSS_RESTART"
-        results = self.results_dir()
-        killed = self.client(DIST_ENTRY)
-        reference = self.bounded(self.distinct_large(killed, 0), marker)[1]
-        before = set(results.iterdir())
-        interrupted = killed.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": EDGES}})
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and set(results.iterdir()) == before:
-            time.sleep(0.001)
-        killed.process.kill()  # SIGKILL while the 1.1 MB result is being retained
-        self.assertIsNone(killed.receive(interrupted, timeout=10), marker + ": missed the interruption window; the request was answered")
+        # SIGKILL once the reply's file appears: the residue (complete or partial) is an unreplied entry.
+        # The reply can occasionally beat the kill; only an attempt that got no reply counts.
+        for _ in range(5):
+            results = self.results_dir()
+            killed = self.client(DIST_ENTRY)
+            reference = self.bounded(self.distinct_large(killed, 0), marker)[1]
+            before = set(results.iterdir())
+            interrupted = killed.send("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": EDGES}})
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and set(results.iterdir()) == before:
+                time.sleep(0.001)
+            killed.process.kill()
+            if killed.receive(interrupted, timeout=10) is None:
+                break
+        else:
+            self.fail(marker + ": the reply beat the kill in 5 attempts")
         residue = set(results.iterdir()) - before
         self.assertEqual(len(residue), 1, marker + f": expected one residue entry, saw {residue}")
         fresh = self.client(DIST_ENTRY)
