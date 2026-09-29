@@ -608,7 +608,7 @@ class WorktreeDetectChangesTests(unittest.TestCase):
             self.assertEqual(impact.returncode, 0, marker + ": " + impact.stdout + impact.stderr)
             for items in json.loads(impact.stdout).get("byDepth", {}).values():
                 expected |= {item["id"] for item in items if item["filePath"].startswith("tests/")}
-        expected -= seeds
+        # A changed test reached from another changed symbol stays impacted (c1d3a3a); impact never lists its own seed.
         self.assertIn("Function:tests/test_chain.py:test_wrapper", expected, marker + ": the depth-3 test must be in the oracle")
         self.assertIn("impacted_tests", payload, marker + ": " + json.dumps(payload)[:600])
         self.assertEqual({test["id"] for test in payload["impacted_tests"]}, expected, marker)
@@ -1312,7 +1312,7 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         (tool,) = [t for t in listed["result"]["tools"] if t["name"] == "detect_changes"]
         self.assertNotIn("are themselves in changed_symbols", tool["description"],
                          marker + ": that inference is false for a caller the path rule does not classify")
-        self.assertIn("not classified as a test by the path rule", tool["description"],
+        self.assertIn("only graph-reached tests recognised by the path rule are reported", tool["description"],
                       marker + ": " + tool["description"][-400:])
 
     def test_a_symbol_with_no_callers_is_counted_as_uncovered(self) -> None:
