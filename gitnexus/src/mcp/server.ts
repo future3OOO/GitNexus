@@ -35,10 +35,11 @@ import { getGlobalDir } from '../storage/repo-manager.js';
 /**
  * Bound what a tool reply puts into the agent's context.
  *
- * A reply over MAX_RESPONSE_BYTES is cut at a line boundary (a newline, or the
- * JSON-escaped newline inside cypher's markdown string) — or mid-line when that
- * would show less than half the budget, as in a one-line error or one huge row — and ends
- * with a footer naming how much is shown and the file holding the complete text.
+ * A reply over MAX_RESPONSE_BYTES becomes valid JSON: complete_result (the file
+ * holding the complete text) and complete_bytes, then the result's fields in their
+ * own order — a field whose JSON fits FIELD_BYTES is kept, a larger object keeps its
+ * fields by the same rule, a larger list becomes its length, a longer string its size
+ * (an error keeps its head). A summary that still exceeds the bound is only the path.
  * Every reply gets its own file under ~/.gitnexus/results, written once and never
  * renamed, so a prune in any process sharing the directory can only remove entries
  * older than the reply's; the newest RETAINED_RESULTS entries are kept (ties with
@@ -46,26 +47,29 @@ import { getGlobalDir } from '../storage/repo-manager.js';
  * answering.
  */
 const MAX_RESPONSE_BYTES = 16384;
+const FIELD_BYTES = 1024;
 const RETAINED_RESULTS = 50;
 
-async function boundedResponse(toolName: string, text: string): Promise<string> {
-  const bytes = Buffer.from(text);
-  if (bytes.length <= MAX_RESPONSE_BYTES) return text;
+function compact(value: unknown, key = ''): unknown {
+  const size = Buffer.byteLength(JSON.stringify(value) ?? '');
+  if (size <= FIELD_BYTES) return value;
+  if (Array.isArray(value)) return { omitted_items: value.length };
+  if (typeof value === 'object' && value !== null)
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, compact(v, k)]));
+  return key === 'error'
+    ? `${String(value).slice(0, 200)}…`
+    : { omitted_bytes: Buffer.byteLength(String(value)) };
+}
+
+async function boundedResponse(toolName: string, text: string, result: unknown): Promise<string> {
+  const bytes = Buffer.byteLength(text);
+  if (bytes <= MAX_RESPONSE_BYTES) return text;
 
   const dir = path.join(getGlobalDir(), 'results');
   const file = path.join(
     dir,
     `${toolName}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.json`,
   );
-  const lines = text.split(/\n|\\n/).length;
-  const footer = (shown: number) =>
-    `\n[gitnexus] bounded: ${shown} of ${lines} lines (${bytes.length} bytes). Complete result: ${file}`;
-  const budget = MAX_RESPONSE_BYTES - Buffer.byteLength(footer(lines));
-  const head = bytes.subarray(0, budget);
-  const lineEnd = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('\\n'));
-  let end = lineEnd > budget / 2 ? lineEnd : budget; // a line longer than half the budget is cut mid-line
-  while ((bytes[end] & 0xc0) === 0x80) end--; // never split a multi-byte character
-  const visible = bytes.subarray(0, end).toString();
 
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   await fs.chmod(dir, 0o700);
@@ -87,7 +91,13 @@ async function boundedResponse(toolName: string, text: string): Promise<string> 
       .map((e) => fs.rm(path.join(dir, e.name), { force: true })),
   );
   await fs.access(file);
-  return visible + footer(visible.split(/\n|\\n/).length);
+  const head = { complete_result: file, complete_bytes: bytes };
+  const kept =
+    typeof result === 'object' && !Array.isArray(result)
+      ? compact(result)
+      : { result: compact(result) };
+  const summary = JSON.stringify({ ...head, ...(kept as object) }, null, 2);
+  return Buffer.byteLength(summary) <= MAX_RESPONSE_BYTES ? summary : JSON.stringify(head, null, 2);
 }
 
 /**
@@ -187,7 +197,7 @@ export function createMCPServer(backend: LocalBackend): Server {
         content: [
           {
             type: 'text',
-            text: await boundedResponse(name, resultText),
+            text: await boundedResponse(name, resultText, result),
           },
         ],
       };

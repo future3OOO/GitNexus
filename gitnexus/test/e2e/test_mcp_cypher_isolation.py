@@ -31,7 +31,6 @@ CRASH = ("MATCH p=(caller)-[:CodeRelation*1..5]->(target:Function {name: 'target
 COUNT = "MATCH (n:Function) RETURN count(n) AS n"
 EDGES = "MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN a, r, b"
 MAX_RESPONSE_BYTES = 16384
-FOOTER = re.compile(r"\n\[gitnexus\] bounded: (\d+) of (\d+) lines \((\d+) bytes\)\. Complete result: (\S+)")
 RUNAWAY = ("MATCH (a:Function),(b:Function),(c:Function),(d:Function),(e:Function) "
            "WHERE a.startLine + b.startLine + c.startLine + d.startLine + e.startLine = -1 RETURN count(*) AS n")
 SEED_SCRIPT = """
@@ -332,22 +331,17 @@ class McpCypherIsolationTests(unittest.TestCase):
         shutil.rmtree(results, ignore_errors=True)
         return results
 
-    def bounded(self, text: str, marker: str) -> tuple[str, Path]:
-        """The visible head and the retained file of a bounded reply; fails with marker when the reply floods."""
+    def bounded(self, text: str, marker: str) -> tuple[dict, Path]:
+        """The JSON summary and the retained file of a bounded reply; fails with marker when the reply floods or does not parse."""
         self.assertLessEqual(len(text.encode()), MAX_RESPONSE_BYTES, marker + f": {len(text.encode())} bytes reached the agent")
-        footer = FOOTER.search(text)
-        self.assertIsNotNone(footer, marker + f": no bounded footer in {text[-300:]!r}")
-        self.assertEqual(footer.end(), len(text), marker + ": the footer is not the end of the reply")
-        path = Path(footer.group(4))
-        self.assertTrue(path.is_file(), marker + f": retained file {path} missing")
-        full = path.read_text(encoding="utf-8")
-        head = text[: footer.start()]
-        self.assertTrue(full.startswith(head), marker + ": the visible head is not a prefix of the retained result")
-        # cut at a line boundary, or mid-line when the last boundary sat in the first half of the head
-        self.assertTrue(re.match(r"\n|\\n", full[len(head):]) or len(head.encode()) > MAX_RESPONSE_BYTES // 2 - 200,
-                        marker + f": the cut is neither at a line boundary nor near the budget ({len(head.encode())} bytes)")
-        self.assertEqual(int(footer.group(3)), len(full.encode()), marker + ": the footer misstates the total size")
-        return head, path
+        try:
+            reply = json.loads(text)
+        except ValueError:
+            self.fail(marker + f": the bounded reply is not valid JSON: {text[-200:]!r}")
+        path = Path(reply.get("complete_result", ""))
+        self.assertTrue(path.is_file(), marker + f": no retained file named in {text[:300]!r}")
+        self.assertEqual(reply["complete_bytes"], path.stat().st_size, marker + ": complete_bytes misstates the retained size")
+        return reply, path
 
     def distinct_large(self, client: McpClient, k: int) -> str:
         return client.text("cypher", {"repo": REPO, "query": f"MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN a.id, b.id, {k} AS k"})
@@ -356,10 +350,10 @@ class McpCypherIsolationTests(unittest.TestCase):
         marker = "LARGE_RESULT_FLOODED"
         self.results_dir().mkdir(mode=0o755)  # a results directory left by an earlier run must be made private too
         client = self.client()
-        head, path = self.bounded(client.text("cypher", {"repo": REPO, "query": EDGES}, timeout=180), marker)
-        self.assertIn('"row_count": 1500', head, marker + ": the row count is not visible ahead of the table")
-        self.assertGreater(len(head.encode()), MAX_RESPONSE_BYTES // 2, marker + ": less than half the bound is visible")
+        reply, path = self.bounded(client.text("cypher", {"repo": REPO, "query": EDGES}, timeout=180), marker)
         full = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(reply["row_count"], 1500, marker + ": the row count is not in the summary")
+        self.assertEqual(reply["markdown"], {"omitted_bytes": len(full["markdown"].encode())}, marker + ": the table preview is still in the reply")
         self.assertEqual(full["row_count"], 1500, marker + ": retained result incomplete")
         self.assertGreater(len(full["markdown"]), 65536, marker + " (retained result smaller than one pipe buffer)")
         self.assertEqual(path.parent.stat().st_mode & 0o777, 0o700, "RETAINED_RESULT_WORLD_READABLE: a pre-existing results directory was left shared")
@@ -368,44 +362,26 @@ class McpCypherIsolationTests(unittest.TestCase):
 
     def test_large_impact_result_is_bounded_and_retained(self) -> None:
         marker = "LARGE_JSON_FLOODED"
-        head, path = self.bounded(self.client().text("impact", {"repo": REPO, "target": "target", "direction": "upstream"}), marker)
-        self.assertIn('"id": "f0"', head, marker + ": target identity not visible")
-        self.assertIn('"impactedCount"', head, marker + ": impacted count not visible")
+        reply, path = self.bounded(self.client().text("impact", {"repo": REPO, "target": "target", "direction": "upstream"}), marker)
+        self.assertEqual((reply["target"]["id"], "impactedCount" in reply, "risk" in reply), ("f0", True, True), marker + ": target, count or risk not in the summary")
         cli = subprocess.run([*DIST_ENTRY, "impact", "target", "-d", "upstream", "-r", REPO], cwd=PACKAGE, text=True, capture_output=True,
                              env={**os.environ, "HOME": str(HOME)}, timeout=300)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8")), json.loads(cli.stdout), marker + ": retained result differs from the unbounded CLI result")
 
     def test_large_context_result_is_bounded_and_retained(self) -> None:
         marker = "LARGE_CONTEXT_FLOODED"
-        head, path = self.bounded(self.client().text("context", {"repo": REPO, "uid": "f1", "include_content": True}), marker)
-        self.assertIn('"uid": "f1"', head, marker + ": symbol identity not visible")
-        self.assertEqual(len(json.loads(path.read_text(encoding="utf-8"))["symbol"]["content"]), 20000, marker + ": retained content incomplete")
+        reply, path = self.bounded(self.client().text("context", {"repo": REPO, "uid": "f1", "include_content": True}), marker)
+        self.assertEqual((reply["symbol"]["uid"], reply["symbol"]["content"]), ("f1", {"omitted_bytes": 20000}), marker + f": {reply['symbol']}")
+        cli = subprocess.run([*DIST_ENTRY, "context", "-u", "f1", "--content", "-r", REPO], cwd=PACKAGE, text=True, capture_output=True,
+                             env={**os.environ, "HOME": str(HOME)}, timeout=300)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), json.loads(cli.stdout), marker + ": retained result differs from the unbounded CLI result")
 
     def test_oversized_error_keeps_its_meaning(self) -> None:
         marker = "LARGE_ERROR_FLOODED"
         query = 'MATCH (n:Function) WHERE n.name = "' + "x" * 20000 + '" RETURN n.name ('
-        head, path = self.bounded(self.client().text("cypher", {"repo": REPO, "query": query}), marker)
-        self.assertTrue(head.startswith('{\n  "error": "Parser exception'), marker + f": error meaning not visible: {head[:120]!r}")
+        reply, path = self.bounded(self.client().text("cypher", {"repo": REPO, "query": query}), marker)
+        self.assertTrue(reply["error"].startswith("Parser exception"), marker + f": error meaning not visible: {reply['error'][:120]!r}")
         self.assertIn("Parser exception", json.loads(path.read_text(encoding="utf-8"))["error"], marker + ": retained error incomplete")
-
-    def test_single_line_oversized_error_keeps_its_meaning(self) -> None:
-        # With no line boundary inside the head, the cut must still show the error key and the message head.
-        marker = "ERROR_HEAD_HIDDEN"
-        head, path = self.bounded(self.client().text("cypher", {"repo": REPO, "query": 'RETURN to_int64("' + "x" * 20000 + '")'}), marker)
-        self.assertTrue(head.startswith('{\n  "error": "Conversion exception'), marker + f": {head[:80]!r}")
-        self.assertGreater(len(head.encode()), 8192, marker + f": only {len(head.encode())} bytes of the error are visible")
-        self.assertIn("Conversion exception", json.loads(path.read_text(encoding="utf-8"))["error"], marker + ": retained error incomplete")
-
-    def test_mid_line_cut_never_splits_a_character(self) -> None:
-        marker = "CHARACTER_SPLIT_AT_CUT"
-        text = self.client(DIST_ENTRY).text("cypher", {"repo": REPO, "query": 'RETURN to_int64("' + "日" * 20000 + '")'})
-        head = self.bounded(text, marker)[0]
-        self.assertEqual(("\ufffd" in text, head.endswith("日")), (False, True), marker + f": {head[-12:]!r}")
-
-    def test_one_row_result_shows_its_row(self) -> None:
-        marker = "ROW_HIDDEN_BEHIND_CUT"
-        head = self.bounded(self.client().text("cypher", {"repo": REPO, "query": "MATCH (a:Function)-[r:CodeRelation]->(b:Function) RETURN collect(a.id+'->'+b.id) AS edges"}), marker)[0]
-        self.assertEqual((len(head.encode()) > MAX_RESPONSE_BYTES // 2, "->" in head), (True, True), marker + f": {len(head.encode())} bytes visible")
 
     def test_thrown_error_stays_bounded(self) -> None:
         marker = "THROWN_ERROR_FLOODED"
@@ -486,7 +462,7 @@ class McpCypherIsolationTests(unittest.TestCase):
         response = client.request("tools/call", {"name": "cypher", "arguments": {"repo": REPO, "query": EDGES}}, timeout=180)
         self.assertIsNotNone(response, marker + " (no response)")
         text = response["result"]["content"][0]["text"]
-        self.assertEqual((response["result"].get("isError"), "[gitnexus] bounded" in text, "| f" in text), (True, False, False), marker + f": {text[:200]!r}")
+        self.assertEqual((response["result"].get("isError"), "complete_result" in text, "| f" in text), (True, False, False), marker + f": {text[:200]!r}")
         self.assertLess(len(text.encode()), 1024, marker + f": {len(text.encode())} bytes")
         self.assertRegex(text, r"\d{5,} bytes", marker + ": size not named")
         self.assertEqual(len(list(results.iterdir())), 50, marker + ": the evicted file or the planted entries changed")
