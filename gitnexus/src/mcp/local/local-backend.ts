@@ -1007,8 +1007,8 @@ export class LocalBackend {
     );
 
     return {
-      markdown: [header, separator, ...dataRows].join('\n'),
       row_count: result.length,
+      markdown: [header, separator, ...dataRows].join('\n'),
     };
   }
 
@@ -1896,10 +1896,10 @@ export class LocalBackend {
           risk_level: 'none',
           message: 'No changes detected.',
         },
+        analysis: analysis(),
         changed_symbols: [],
         affected_processes: [],
         impacted_tests: [],
-        analysis: analysis(),
       };
     }
 
@@ -2058,10 +2058,10 @@ export class LocalBackend {
         changed_files: changedFiles.size,
         risk_level: risk,
       },
+      analysis: analysis(),
       changed_symbols: changedSymbols,
       affected_processes: Array.from(affectedProcesses.values()),
       impacted_tests: impactedTests,
-      analysis: analysis(),
     };
   }
 

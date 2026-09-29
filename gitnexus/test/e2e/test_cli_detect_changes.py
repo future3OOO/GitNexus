@@ -376,6 +376,26 @@ class DetectChangesCliTests(unittest.TestCase):
         self.assertIsNotNone(mcp, marker + ": the MCP server gave no answer")
         self.assertEqual(normalized(cli), normalized(mcp), marker)
 
+    def test_a_bounded_mcp_reply_keeps_the_coverage_verdict_visible(self) -> None:
+        # #27: a large reply is cut to 16 KB; the coverage verdict must not fall behind the cut while the risk verdict shows.
+        marker = "COVERAGE_CAVEAT_HIDDEN"
+        wide = "".join(f"def fn_{i}():\n    return {i}\n\n\n" for i in range(200))
+        (self.repo / "wide.py").write_text(wide, encoding="utf-8")
+        self.git("add", "wide.py")
+        self.git("commit", "-q", "-m", "wide")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+        (self.repo / "wide.py").write_text(wide.replace("return", "return 1 +"), encoding="utf-8")
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+        text = client.text("detect_changes", {"repo": str(self.repo), "scope": "unstaged"})
+        self.assertLessEqual(len(text.encode()), 16384, marker + f": {len(text.encode())} bytes reached the agent")
+        self.assertIn("[gitnexus] bounded:", text, marker + ": the reply was not bounded, so the attack did not reach the cut")
+        head = text[: text.rindex("\n[gitnexus] bounded:")]
+        self.assertIn('"analysis"', head, marker + ": the coverage verdict fell behind the cut: " + head[:300])
+        self.assertLess(head.index('"analysis"'), head.index('"changed_symbols"'), marker + ": analysis is listed after the long symbol list")
+        self.assertIn('"status"', head[head.index('"analysis"'):], marker + ": analysis.status is not visible")
+
 
 SERVICE = (
     "class Service:\n"
@@ -588,7 +608,7 @@ class WorktreeDetectChangesTests(unittest.TestCase):
             self.assertEqual(impact.returncode, 0, marker + ": " + impact.stdout + impact.stderr)
             for items in json.loads(impact.stdout).get("byDepth", {}).values():
                 expected |= {item["id"] for item in items if item["filePath"].startswith("tests/")}
-        expected -= seeds
+        # A changed test reached from another changed symbol stays impacted (c1d3a3a); impact never lists its own seed.
         self.assertIn("Function:tests/test_chain.py:test_wrapper", expected, marker + ": the depth-3 test must be in the oracle")
         self.assertIn("impacted_tests", payload, marker + ": " + json.dumps(payload)[:600])
         self.assertEqual({test["id"] for test in payload["impacted_tests"]}, expected, marker)
@@ -1292,7 +1312,7 @@ class WorktreeDetectChangesTests(unittest.TestCase):
         (tool,) = [t for t in listed["result"]["tools"] if t["name"] == "detect_changes"]
         self.assertNotIn("are themselves in changed_symbols", tool["description"],
                          marker + ": that inference is false for a caller the path rule does not classify")
-        self.assertIn("not classified as a test by the path rule", tool["description"],
+        self.assertIn("only graph-reached tests recognised by the path rule are reported", tool["description"],
                       marker + ": " + tool["description"][-400:])
 
     def test_a_symbol_with_no_callers_is_counted_as_uncovered(self) -> None:

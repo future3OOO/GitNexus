@@ -11,7 +11,10 @@
  * Resources: repos, repo/{name}/context, repo/{name}/clusters, ...
  */
 
+import { randomUUID } from 'node:crypto';
+import * as fs from 'node:fs/promises';
 import { createRequire } from 'module';
+import * as path from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { CompatibleStdioServerTransport } from './compatible-stdio-transport.js';
 import {
@@ -27,54 +30,64 @@ import { GITNEXUS_TOOLS } from './tools.js';
 import { realStdoutWrite } from './core/lbug-adapter.js';
 import type { LocalBackend } from './local/local-backend.js';
 import { getResourceDefinitions, getResourceTemplates, readResource } from './resources.js';
+import { getGlobalDir } from '../storage/repo-manager.js';
 
 /**
- * Next-step hints appended to tool responses.
+ * Bound what a tool reply puts into the agent's context.
  *
- * Agents often stop after one tool call. These hints guide them to the
- * logical next action, creating a self-guiding workflow without hooks.
- *
- * Design: Each hint is a short, actionable instruction (not a suggestion).
- * The hint references the specific tool/resource to use next.
+ * A reply over MAX_RESPONSE_BYTES is cut at a line boundary (a newline, or the
+ * JSON-escaped newline inside cypher's markdown string) — or mid-line when that
+ * would show less than half the budget, as in a one-line error or one huge row — and ends
+ * with a footer naming how much is shown and the file holding the complete text.
+ * Every reply gets its own file under ~/.gitnexus/results, written once and never
+ * renamed, so a prune in any process sharing the directory can only remove entries
+ * older than the reply's; the newest RETAINED_RESULTS entries are kept (ties with
+ * the last kept entry included) and the call verifies its file survived before
+ * answering.
  */
-function getNextStepHint(toolName: string, args: Record<string, any> | undefined): string {
-  const repo = args?.repo;
-  const repoParam = repo ? `, repo: "${repo}"` : '';
-  const repoPath = repo || '{name}';
+const MAX_RESPONSE_BYTES = 16384;
+const RETAINED_RESULTS = 50;
 
-  switch (toolName) {
-    case 'list_repos':
-      return `\n\n---\n**Next:** READ gitnexus://repo/{name}/context for any repo above to get its overview and check staleness.`;
+async function boundedResponse(toolName: string, text: string): Promise<string> {
+  const bytes = Buffer.from(text);
+  if (bytes.length <= MAX_RESPONSE_BYTES) return text;
 
-    case 'query':
-      return `\n\n---\n**Next:** To understand a specific symbol in depth, use context({name: "<symbol_name>"${repoParam}}) to see categorized refs and process participation.`;
+  const dir = path.join(getGlobalDir(), 'results');
+  const file = path.join(
+    dir,
+    `${toolName}-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}.json`,
+  );
+  const lines = text.split(/\n|\\n/).length;
+  const footer = (shown: number) =>
+    `\n[gitnexus] bounded: ${shown} of ${lines} lines (${bytes.length} bytes). Complete result: ${file}`;
+  const budget = MAX_RESPONSE_BYTES - Buffer.byteLength(footer(lines));
+  const head = bytes.subarray(0, budget);
+  const lineEnd = Math.max(head.lastIndexOf('\n'), head.lastIndexOf('\\n'));
+  let end = lineEnd > budget / 2 ? lineEnd : budget; // a line longer than half the budget is cut mid-line
+  while ((bytes[end] & 0xc0) === 0x80) end--; // never split a multi-byte character
+  const visible = bytes.subarray(0, end).toString();
 
-    case 'context':
-      return `\n\n---\n**Next:** If planning changes, use impact({target: "${args?.name || '<name>'}", direction: "upstream"${repoParam}}) to check blast radius. To see execution flows, READ gitnexus://repo/${repoPath}/processes.`;
-
-    case 'impact':
-      return `\n\n---\n**Next:** Review d=1 items first (WILL BREAK). To check affected execution flows, READ gitnexus://repo/${repoPath}/processes.`;
-
-    case 'detect_changes':
-      return `\n\n---\n**Next:** Review affected processes. Use context() on high-risk changed symbols. READ gitnexus://repo/${repoPath}/process/{name} for full execution traces.`;
-
-    case 'rename':
-      return `\n\n---\n**Next:** Run detect_changes(${repoParam ? `{repo: "${repo}"}` : ''}) to verify no unexpected side effects from the rename.`;
-
-    case 'cypher':
-      return `\n\n---\n**Next:** To explore a result symbol, use context({name: "<name>"${repoParam}}). For schema reference, READ gitnexus://repo/${repoPath}/schema.`;
-
-    // Legacy tool names — still return useful hints
-    case 'search':
-      return `\n\n---\n**Next:** To understand a result in context, use context({name: "<symbol_name>"${repoParam}}).`;
-    case 'explore':
-      return `\n\n---\n**Next:** If planning changes, use impact({target: "<name>", direction: "upstream"${repoParam}}).`;
-    case 'overview':
-      return `\n\n---\n**Next:** To drill into an area, READ gitnexus://repo/${repoPath}/cluster/{name}. To see execution flows, READ gitnexus://repo/${repoPath}/processes.`;
-
-    default:
-      return '';
-  }
+  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
+  await fs.chmod(dir, 0o700);
+  await fs.writeFile(file, text, { mode: 0o600 });
+  const entries = await Promise.all(
+    (await fs.readdir(dir)).map(async (name) => ({
+      name,
+      mtime: await fs.stat(path.join(dir, name)).then(
+        (s) => s.mtimeMs,
+        () => 0,
+      ),
+    })),
+  );
+  entries.sort((a, b) => b.mtime - a.mtime);
+  const oldest = entries[RETAINED_RESULTS - 1]?.mtime ?? 0;
+  await Promise.all(
+    entries
+      .filter((e) => e.mtime < oldest)
+      .map((e) => fs.rm(path.join(dir, e.name), { force: true })),
+  );
+  await fs.access(file);
+  return visible + footer(visible.split(/\n|\\n/).length);
 }
 
 /**
@@ -161,32 +174,32 @@ export function createMCPServer(backend: LocalBackend): Server {
     })),
   }));
 
-  // Handle tool calls — append next-step hints to guide agent workflow
+  // Handle tool calls — bound what reaches the agent, retain the complete result
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    let resultText: string | undefined;
 
     try {
       const result = await backend.callTool(name, args);
-      const resultText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-      const hint = getNextStepHint(name, args as Record<string, any> | undefined);
+      resultText = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
 
       return {
         content: [
           {
             type: 'text',
-            text: resultText + hint,
+            text: await boundedResponse(name, resultText),
           },
         ],
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error';
+      const text =
+        resultText === undefined
+          ? `Error: ${message}`
+          : `Error: ${name} produced ${Buffer.byteLength(resultText)} bytes, over the ${MAX_RESPONSE_BYTES}-byte reply bound, and the complete result could not be retained: ${message}`;
       return {
-        content: [
-          {
-            type: 'text',
-            text: `Error: ${message}`,
-          },
-        ],
+        // A thrown message can echo caller input; MAX_RESPONSE_BYTES/4 characters never exceed the byte bound.
+        content: [{ type: 'text', text: text.slice(0, MAX_RESPONSE_BYTES / 4) }],
         isError: true,
       };
     }

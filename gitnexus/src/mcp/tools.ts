@@ -32,11 +32,7 @@ export const GITNEXUS_TOOLS: ToolDefinition[] = [
 
 Returns each repo's name, path, indexed date, last commit, and stats.
 
-WHEN TO USE: First step when multiple repos are indexed, or to discover available repos.
-AFTER THIS: READ gitnexus://repo/{name}/context for the repo you want to work with.
-
-When multiple repos are indexed, you MUST specify the "repo" parameter
-on other tools (query, context, impact, etc.) to target the correct one.`,
+WHEN TO USE: Only when no repository is already known. A context packet or prior result that names the repo is authoritative — pass it as "repo" on the other tools instead of listing.`,
     inputSchema: {
       type: 'object',
       properties: {},
@@ -49,7 +45,6 @@ on other tools (query, context, impact, etc.) to target the correct one.`,
 Returns processes (call chains) ranked by relevance, each with its symbols and file locations.
 
 WHEN TO USE: Understanding how code works together. Use this when you need execution flows and relationships, not just file matches. Complements grep/IDE search.
-AFTER THIS: Use context() on a specific symbol for 360-degree view (callers, callees, categorized refs).
 
 Returns results grouped by process (execution flow):
 - processes: ranked execution flows with relevance priority
@@ -93,8 +88,7 @@ Hybrid ranking: BM25 keyword + semantic vector search, ranked by Reciprocal Rank
     name: 'cypher',
     description: `Execute Cypher query against the code knowledge graph.
 
-WHEN TO USE: Complex structural queries that search/explore can't answer. READ gitnexus://repo/{name}/schema first for the full schema.
-AFTER THIS: Use context() on result symbols for deeper context.
+WHEN TO USE: One named relationship that completed checks did not answer. Use the exact repo and symbol id you already hold; ask for that relationship in one direction and nothing more. Widen (impact, context) only when an observed dependency requires it.
 AVOID: a variable-length path (*1..n) with ALL or ANY over relationships(p); it crashes the engine. Use impact for reachability and blast radius.
 
 SCHEMA:
@@ -105,31 +99,18 @@ SCHEMA:
 - Edge properties: type (STRING), confidence (DOUBLE), reason (STRING), step (INT32)
 
 EXAMPLES:
-• Find callers of a function:
-  MATCH (a)-[:CodeRelation {type: 'CALLS'}]->(b:Function {name: "validateUser"}) RETURN a.name, a.filePath
+• Callers of one exact symbol (id from a prior result or the packet):
+  MATCH (a)-[:CodeRelation {type: 'CALLS'}]->(b {id: "Function:src/auth.ts:validateUser"}) RETURN a.id
 
-• Find community members:
-  MATCH (f)-[:CodeRelation {type: 'MEMBER_OF'}]->(c:Community) WHERE c.heuristicLabel = "Auth" RETURN f.name
+• Callees of that symbol: reverse the arrow.
+
+• Find all writers of a field:
+  MATCH (f)-[r:CodeRelation {type: 'ACCESSES', reason: 'write'}]->(p:Property) WHERE p.name = "address" RETURN f.name, f.filePath
 
 • Trace a process:
   MATCH (s)-[r:CodeRelation {type: 'STEP_IN_PROCESS'}]->(p:Process) WHERE p.heuristicLabel = "UserLogin" RETURN s.name, r.step ORDER BY r.step
 
-• Find all methods of a class:
-  MATCH (c:Class {name: "UserService"})-[r:CodeRelation {type: 'HAS_METHOD'}]->(m:Method) RETURN m.name, m.parameterCount, m.returnType
-
-• Find all properties of a class:
-  MATCH (c:Class {name: "User"})-[r:CodeRelation {type: 'HAS_PROPERTY'}]->(p:Property) RETURN p.name, p.declaredType
-
-• Find all writers of a field:
-  MATCH (f:Function)-[r:CodeRelation {type: 'ACCESSES', reason: 'write'}]->(p:Property) WHERE p.name = "address" RETURN f.name, f.filePath
-
-• Find method overrides (MRO resolution):
-  MATCH (winner:Method)-[r:CodeRelation {type: 'METHOD_OVERRIDES'}]->(loser:Method) RETURN winner.name, winner.filePath, loser.filePath, r.reason
-
-• Detect diamond inheritance:
-  MATCH (d:Class)-[:CodeRelation {type: 'EXTENDS'}]->(b1), (d)-[:CodeRelation {type: 'EXTENDS'}]->(b2), (b1)-[:CodeRelation {type: 'EXTENDS'}]->(a), (b2)-[:CodeRelation {type: 'EXTENDS'}]->(a) WHERE b1 <> b2 RETURN d.name, b1.name, b2.name, a.name
-
-OUTPUT: Returns { markdown, row_count } — results formatted as a Markdown table for easy reading.
+OUTPUT: Returns { row_count, markdown } — results formatted as a Markdown table. A reply over 16 KB is cut and ends with a footer naming the file holding the complete result; read that file rather than re-running the query.
 
 TIPS:
 - All relationships use single CodeRelation table — filter with {type: 'CALLS'} etc.
@@ -153,10 +134,9 @@ TIPS:
     description: `360-degree view of a single code symbol.
 Shows categorized incoming/outgoing references (calls, imports, extends, implements, methods, properties, overrides), process participation, and file location.
 
-WHEN TO USE: After query() to understand a specific symbol in depth. When you need to know all callers, callees, and what execution flows a symbol participates in.
-AFTER THIS: Use impact() if planning changes, or READ gitnexus://repo/{name}/process/{processName} for full execution trace.
+WHEN TO USE: When you need all callers, callees and execution flows of one symbol at once. If a packet or prior result already answered part of that, ask cypher for the missing relationship instead.
 
-Handles disambiguation: if multiple symbols share the same name, returns candidates for you to pick from. Use uid param for zero-ambiguity lookup from prior results.
+Pass uid (from the packet or a prior result) for zero-ambiguity lookup; a bare name may return candidates to pick from.
 
 NOTE: ACCESSES edges (field read/write tracking) are included in context results with reason 'read' or 'write'. CALLS edges resolve through field access chains and method-call chains (e.g., user.address.getCity().save() produces CALLS edges at each step).`,
     inputSchema: {
@@ -187,7 +167,6 @@ NOTE: ACCESSES edges (field read/write tracking) are included in context results
 Maps git diff hunks to indexed symbols, traces which processes are impacted, and lists the tests upstream of the changed symbols (impact --direction upstream --include-tests reachability).
 
 WHEN TO USE: Before committing — to understand what your changes affect. Pre-commit review, PR preparation.
-AFTER THIS: Review affected processes. Use context() on high-risk symbols. READ gitnexus://repo/{name}/process/{name} for full traces.
 
 Returns: changed symbols, affected processes, impacted_tests, a risk summary, and analysis {status: complete|partial|unavailable, uncovered_symbols, reasons, gaps} — a gap names a changed path the graph cannot attribute.
 Each changed symbol carries incoming_edges, how many callers the graph knows for it, and analysis.uncovered_symbols counts those with none. Both are null when the walk did not finish, because zero is a measurement and an unfinished walk made none; analysis.status is partial there and its reason names the fields.
@@ -224,7 +203,6 @@ An empty impacted_tests is not proof that no tests call the changed symbols: onl
 Finds all references via graph (high confidence) and regex text search (lower confidence). Preview by default.
 
 WHEN TO USE: Renaming a function, class, method, or variable across the codebase. Safer than find-and-replace.
-AFTER THIS: Run detect_changes() to verify no unexpected side effects.
 
 Each edit is tagged with confidence:
 - "graph": found via knowledge graph relationships (high confidence, safe to accept)
@@ -257,8 +235,7 @@ Each edit is tagged with confidence:
     description: `Analyze the blast radius of changing a code symbol.
 Returns affected symbols grouped by depth, plus risk assessment, affected execution flows, and affected modules.
 
-WHEN TO USE: Before making code changes — especially refactoring, renaming, or modifying shared code. Shows what would break.
-AFTER THIS: Review d=1 items (WILL BREAK). Use context() on high-risk symbols.
+WHEN TO USE: Before changing shared code, when the transitive blast radius matters. Pass uid from the packet or a prior result. For a single relationship, a one-direction cypher CALLS lookup is smaller.
 
 Output includes:
 - risk: LOW / MEDIUM / HIGH / CRITICAL
@@ -315,7 +292,6 @@ Confidence: 1.0 = certain, <0.8 = fuzzy match`,
     description: `Show API route mappings: which components/hooks fetch which API endpoints, and which handler files serve them.
 
 WHEN TO USE: Understanding API consumption patterns, finding orphaned routes. For pre-change analysis, prefer \`api_impact\` which combines this data with mismatch detection and risk assessment.
-AFTER THIS: Use impact() on specific route handlers to see full blast radius.
 
 Returns: route nodes with their handlers, middleware wrapper chains (e.g., withAuth, withRateLimit), and consumers.`,
     inputSchema: {
