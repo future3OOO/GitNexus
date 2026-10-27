@@ -390,11 +390,32 @@ class DetectChangesCliTests(unittest.TestCase):
         self.addCleanup(client.close)
         text = client.text("detect_changes", {"repo": str(self.repo), "scope": "unstaged"})
         self.assertLessEqual(len(text.encode()), 16384, marker + f": {len(text.encode())} bytes reached the agent")
-        self.assertIn("[gitnexus] bounded:", text, marker + ": the reply was not bounded, so the attack did not reach the cut")
-        head = text[: text.rindex("\n[gitnexus] bounded:")]
-        self.assertIn('"analysis"', head, marker + ": the coverage verdict fell behind the cut: " + head[:300])
-        self.assertLess(head.index('"analysis"'), head.index('"changed_symbols"'), marker + ": analysis is listed after the long symbol list")
-        self.assertIn('"status"', head[head.index('"analysis"'):], marker + ": analysis.status is not visible")
+        try:
+            reply = json.loads(text)
+        except ValueError:
+            self.fail(marker + ": the bounded reply is not valid JSON: " + text[-200:])
+        self.assertIn("complete_result", reply, marker + ": the reply was not bounded, so the attack did not reach the bound")
+        self.assertIn("status", reply.get("analysis", {}), marker + ": analysis.status is not in the summary: " + text[:300])
+
+    def test_a_deep_impact_reply_stays_bounded(self) -> None:
+        # #30: hundreds of small byDepth levels each fit, yet together they would overflow the reply.
+        marker = "DEEP_SUMMARY_FLOODED"
+        chain = "def f0():\n    return 0\n\n\n" + "".join(f"def f{i}():\n    return f{i - 1}()\n\n\n" for i in range(1, 400))
+        (self.repo / "chain.py").write_text(chain, encoding="utf-8")
+        self.git("add", "chain.py")
+        self.git("commit", "-q", "-m", "chain")
+        analyzed = self.cli("analyze", "--force", "--skip-agents-md", str(self.repo), entry=DIST_ENTRY)
+        self.assertEqual(analyzed.returncode, 0, analyzed.stdout + analyzed.stderr)
+        client = McpClient(DIST_ENTRY, self.home)
+        self.addCleanup(client.close)
+        text = client.text("impact", {"repo": str(self.repo), "target": "f0", "direction": "upstream", "maxDepth": 400})
+        self.assertLessEqual(len(text.encode()), 16384, marker + f": {len(text.encode())} bytes reached the agent")
+        try:
+            reply = json.loads(text)
+        except ValueError:
+            self.fail(marker + ": the bounded reply is not valid JSON: " + text[-200:])
+        path = Path(reply["complete_result"])
+        self.assertEqual((len(json.loads(path.read_text(encoding="utf-8"))["byDepth"]), reply["complete_bytes"]), (399, path.stat().st_size), marker)
 
 
 SERVICE = (
