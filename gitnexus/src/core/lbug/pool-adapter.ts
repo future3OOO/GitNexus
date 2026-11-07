@@ -321,6 +321,7 @@ async function doInitLbug(repoId: string, dbPath: string): Promise<void> {
   // the connection while the async FTS load is in progress.
   if (!shared.ftsLoaded) {
     try {
+      await available[0].query('INSTALL fts');
       await available[0].query('LOAD EXTENSION fts');
       shared.ftsLoaded = true;
     } catch {

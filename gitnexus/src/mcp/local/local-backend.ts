@@ -207,6 +207,7 @@ export class LocalBackend {
   private initializedRepos: Set<string> = new Set();
   private reinitPromises: Map<string, Promise<void>> = new Map();
   private lastStalenessCheck: Map<string, number> = new Map();
+  private pendingWrites: Set<Promise<void>> = new Set();
   private groupToolSvc: GroupService | null = null;
 
   /**
@@ -2260,17 +2261,25 @@ export class LocalBackend {
     const totalEdits = allChanges.reduce((sum, c) => sum + c.edits.length, 0);
 
     if (!dry_run) {
-      // Apply edits to files
-      for (const change of allChanges) {
-        try {
-          const fullPath = assertSafePath(change.file_path);
-          let content = await fs.readFile(fullPath, 'utf-8');
-          const regex = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
-          content = content.replace(regex, new_name);
-          await fs.writeFile(fullPath, content, 'utf-8');
-        } catch (e) {
-          logQueryError('rename:apply-edit', e);
+      const writes = (async () => {
+        // Apply edits to files
+        for (const change of allChanges) {
+          try {
+            const fullPath = assertSafePath(change.file_path);
+            let content = await fs.readFile(fullPath, 'utf-8');
+            const regex = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+            content = content.replace(regex, new_name);
+            await fs.writeFile(fullPath, content, 'utf-8');
+          } catch (e) {
+            logQueryError('rename:apply-edit', e);
+          }
         }
+      })();
+      this.pendingWrites.add(writes);
+      try {
+        await writes;
+      } finally {
+        this.pendingWrites.delete(writes);
       }
     }
 
@@ -3643,6 +3652,9 @@ export class LocalBackend {
   }
 
   async disconnect(): Promise<void> {
+    while (this.pendingWrites.size > 0) {
+      await Promise.allSettled(this.pendingWrites);
+    }
     await closeLbug(); // close all connections
     // Note: we intentionally do NOT call disposeEmbedder() here.
     // ONNX Runtime's native cleanup segfaults on macOS and some Linux configs,
