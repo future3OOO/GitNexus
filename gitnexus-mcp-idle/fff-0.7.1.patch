@@ -1,0 +1,229 @@
+diff --git a/crates/fff-mcp/src/cursor.rs b/crates/fff-mcp/src/cursor.rs
+--- a/crates/fff-mcp/src/cursor.rs
++++ b/crates/fff-mcp/src/cursor.rs
+@@ -1,28 +1,60 @@
+ //! Cursor store for grep pagination.
+ //!
+-//! Maintains an in-memory map of opaque cursor IDs to file offsets.
++//! Keeps opaque cursor IDs and offsets across workers when a session file is set.
+ //! Cursors are evicted LRU-style when the store exceeds capacity.
+ 
+ use std::collections::{HashMap, VecDeque};
++use std::fs::{File, OpenOptions};
++use std::io::{self, Seek, Write};
+ 
+ const MAX_CURSORS: usize = 20;
+ 
+ /// Stores cursor state for paginated grep results.
++#[derive(Default, serde::Serialize, serde::Deserialize)]
+ pub struct CursorStore {
+     counter: u64,
+     /// Map from cursor ID string → file offset for next page.
+     cursors: HashMap<String, usize>,
+     /// Insertion order for LRU eviction.
+     insertion_order: VecDeque<String>,
++    #[serde(skip)]
++    session: Option<File>,
++    #[serde(skip)]
++    dirty: bool,
+ }
+ 
+ impl CursorStore {
+-    pub fn new() -> Self {
+-        Self {
+-            counter: 0,
+-            cursors: HashMap::new(),
+-            insertion_order: VecDeque::new(),
++    pub fn new() -> io::Result<(Self, bool)> {
++        let Some(path) = std::env::var_os("FFF_MCP_CURSOR_STATE") else {
++            return Ok((Self::default(), false));
++        };
++        let file = OpenOptions::new().read(true).write(true).open(path)?;
++        let resuming = file.metadata()?.len() > 0;
++        let mut store = if resuming {
++            serde_json::from_reader(&file).map_err(io::Error::other)?
++        } else {
++            Self::default()
++        };
++        store.session = Some(file);
++        if !resuming {
++            store.dirty = true;
++            store.save_session()?;
+         }
++        Ok((store, resuming))
++    }
++
++    pub fn save_session(&mut self) -> io::Result<()> {
++        if !self.dirty {
++            return Ok(());
++        }
++        if let Some(mut file) = self.session.as_ref() {
++            let bytes = serde_json::to_vec(self).map_err(io::Error::other)?;
++            file.rewind()?;
++            file.write_all(&bytes)?;
++            file.set_len(bytes.len() as u64)?;
++        }
++        self.dirty = false;
++        Ok(())
+     }
+ 
+     /// Store a cursor and return its opaque ID string.
+@@ -42,6 +74,7 @@
+             }
+         }
+ 
++        self.dirty = true;
+         id
+     }
+ 
+diff --git a/crates/fff-mcp/src/main.rs b/crates/fff-mcp/src/main.rs
+--- a/crates/fff-mcp/src/main.rs
++++ b/crates/fff-mcp/src/main.rs
+@@ -279,26 +279,36 @@
+     }
+ 
+     // Create and start the MCP server
+-    let server = FffServer::new(shared_picker.clone(), shared_frecency.clone());
+-
+-    // Wait for initial scan in background — don't block server startup
++    let (server, resuming) = FffServer::new(shared_picker.clone(), shared_frecency.clone())?;
+     let picker_clone_for_scan = shared_picker.clone();
+-    tokio::task::spawn_blocking(move || {
++    let wait = move || {
+         let start = std::time::Instant::now();
+         loop {
+-            let is_scanning = picker_clone_for_scan
++            let not_ready = picker_clone_for_scan
+                 .read()
+                 .ok()
+-                .and_then(|g| g.as_ref().map(|p| p.is_scan_active()))
++                .and_then(|guard| {
++                    guard.as_ref().map(|picker| {
++                        if resuming {
++                            !picker.get_scan_progress().is_watcher_ready
++                        } else {
++                            picker.is_scan_active()
++                        }
++                    })
++                })
+                 .unwrap_or(true);
+-
+-            if !is_scanning {
++            if !not_ready {
+                 tracing::info!("Initial scan completed in {:?}", start.elapsed());
+                 break;
+             }
+             std::thread::sleep(std::time::Duration::from_millis(50));
+         }
+-    });
++    };
++    if resuming {
++        wait();
++    } else {
++        tokio::task::spawn_blocking(wait);
++    }
+ 
+     let service = server
+         .serve(stdio())
+diff --git a/crates/fff-mcp/src/server.rs b/crates/fff-mcp/src/server.rs
+--- a/crates/fff-mcp/src/server.rs
++++ b/crates/fff-mcp/src/server.rs
+@@ -190,31 +190,21 @@
+ }
+ 
+ impl FffServer {
+-    pub fn new(picker: SharedFilePicker, frecency: SharedFrecency) -> Self {
+-        Self {
+-            picker,
+-            frecency,
+-            cursor_store: Arc::new(Mutex::new(CursorStore::new())),
+-            update_notice_sent: Arc::new(AtomicBool::new(false)),
+-            tool_router: Self::tool_router(),
+-        }
+-    }
+-
+-    #[allow(dead_code)]
+-    pub fn wait_for_scan(&self) {
+-        loop {
+-            let guard = self.picker.read().ok();
+-            let is_scanning = guard
+-                .as_ref()
+-                .and_then(|g| g.as_ref())
+-                .map(|p| p.is_scan_active())
+-                .unwrap_or(true);
+-
+-            if !is_scanning {
+-                break;
+-            }
+-            std::thread::sleep(std::time::Duration::from_millis(50));
+-        }
++    pub fn new(
++        picker: SharedFilePicker,
++        frecency: SharedFrecency,
++    ) -> std::io::Result<(Self, bool)> {
++        let (cursor_store, resuming) = CursorStore::new()?;
++        Ok((
++            Self {
++                picker,
++                frecency,
++                cursor_store: Arc::new(Mutex::new(cursor_store)),
++                update_notice_sent: Arc::new(AtomicBool::new(false)),
++                tool_router: Self::tool_router(),
++            },
++            resuming,
++        ))
+     }
+ 
+     fn lock_cursors(&self) -> Result<std::sync::MutexGuard<'_, CursorStore>, ErrorData> {
+@@ -223,17 +213,21 @@
+         })
+     }
+ 
+-    fn maybe_append_update_notice(&self, result: &mut CallToolResult) {
++    fn finish_tool_result(&self, result: &mut CallToolResult) -> Result<(), ErrorData> {
++        self.lock_cursors()?.save_session().map_err(|error| {
++            ErrorData::internal_error(format!("Failed to save cursor session: {error}"), None)
++        })?;
+         if self.update_notice_sent.swap(true, Ordering::Relaxed) {
+-            return;
++            return Ok(());
+         }
+         let notice = crate::update_check::get_update_notice();
+         if notice.is_empty() {
+             // Reset so the next call can try again (check may still be in flight)
+             self.update_notice_sent.store(false, Ordering::Relaxed);
+-            return;
++            return Ok(());
+         }
+         result.content.push(Content::text(notice));
++        Ok(())
+     }
+ 
+     fn perform_grep(
+@@ -508,7 +502,7 @@
+         }
+ 
+         let mut result = CallToolResult::success(vec![Content::text(lines.join("\n"))]);
+-        self.maybe_append_update_notice(&mut result);
++        self.finish_tool_result(&mut result)?;
+         Ok(result)
+     }
+ 
+@@ -542,7 +536,7 @@
+             output_mode,
+             None,
+         )?;
+-        self.maybe_append_update_notice(&mut result);
++        self.finish_tool_result(&mut result)?;
+         Ok(result)
+     }
+ 
+@@ -557,7 +551,7 @@
+         Parameters(params): Parameters<MultiGrepParams>,
+     ) -> Result<CallToolResult, ErrorData> {
+         let mut result = self.multi_grep_inner(params)?;
+-        self.maybe_append_update_notice(&mut result);
++        self.finish_tool_result(&mut result)?;
+         Ok(result)
+     }
+ }

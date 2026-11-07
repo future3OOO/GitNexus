@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+gitnexus-mcp-idle/target/
 
 # TypeScript build info
 *.tsbuildinfo
