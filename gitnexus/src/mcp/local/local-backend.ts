@@ -2267,7 +2267,10 @@ export class LocalBackend {
           try {
             const fullPath = assertSafePath(change.file_path);
             let content = await fs.readFile(fullPath, 'utf-8');
-            const regex = new RegExp(`\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+            const regex = new RegExp(
+              `\\b${oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`,
+              'g',
+            );
             content = content.replace(regex, new_name);
             await fs.writeFile(fullPath, content, 'utf-8');
           } catch (e) {
