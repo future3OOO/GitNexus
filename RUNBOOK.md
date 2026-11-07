@@ -83,7 +83,7 @@ Restart the editor MCP session if needed. The server **refreshes the registry la
 
 **Symptom:** each agent thread keeps a `gitnexus mcp` process that holds 300–700 MB after its first query, until the thread ends.
 
-**Fix:** run the server through `gitnexus-mcp-idle`. It forwards stdio unchanged, stops the server after the idle period with no request open, and starts it again on the next request. An idle thread then holds the launcher only (under 1 MB). The first call after an idle stop starts the server and opens its index again.
+**Fix:** run the server through `gitnexus-mcp-idle`. It forwards stdio unchanged, stops the server after the idle period with no request open, and starts it again on the next request. An idle thread then holds the launcher only (under 1 MB). Workers must exit on stdin EOF. The first call after idle reopens the index. Build from the repository root on Linux x86-64:
 
 ```bash
 cargo build --release --target x86_64-unknown-linux-musl --manifest-path gitnexus-mcp-idle/Cargo.toml
@@ -97,11 +97,9 @@ command = "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/
 args = ["30", "node", "/path/to/GitNexus/gitnexus/dist/cli/index.js", "mcp"]
 ```
 
-Wrapped servers must be ready for requests and restore any session state needed after a restart.
-
 FFF needs the included `gitnexus-mcp-idle/fff-0.7.1.patch`. It targets **dmtrKovalenko/fff.nvim**, `crates/fff-mcp`, at commit `e8dd50ce5a6857f2dc7f827746163a4b1040ba9c` (0.7.1). It saves the existing bounded cursor store before replying. Restored workers wait for the full index; the first worker keeps upstream startup behavior. Search and ranking code stay unchanged.
 
-From that FFF checkout, with the Rust musl target, musl C compiler, libclang and Zig 0.16.0 installed:
+From that FFF checkout, with the Rust musl target, musl C compiler, libclang and Zig 0.16.0 (used by the `zlob` dependency) installed:
 
 ```bash
 git apply /path/to/GitNexus/gitnexus-mcp-idle/fff-0.7.1.patch
@@ -119,7 +117,7 @@ exec 3<>"$state"
 rm -- "$state"
 export FFF_MCP_CURSOR_STATE=/proc/self/fd/3
 exec "$@"
-''', "fff-idle", "/path/to/gitnexus-mcp-idle", "30", "/path/to/fff/target/x86_64-unknown-linux-musl/ci/fff-mcp", "--no-update-check"]
+''', "fff-idle", "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/release/gitnexus-mcp-idle", "30", "/path/to/fff/target/x86_64-unknown-linux-musl/ci/fff-mcp", "--no-update-check"]
 
 [mcp_servers.fff.env]
 MIMALLOC_ARENA_EAGER_COMMIT = "0"

@@ -11,7 +11,7 @@
 //! server's status, as the server would have.
 
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{exit, Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
@@ -32,10 +32,12 @@ struct Server {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let idle = match args.first().map(|secs| secs.parse::<f64>()) {
-        Some(Ok(secs)) if secs >= 0.0 && secs.is_finite() && args.len() > 1 => {
-            Duration::from_secs_f64(secs)
-        }
+    let idle = match args
+        .first()
+        .and_then(|secs| secs.parse::<f64>().ok())
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok())
+    {
+        Some(idle) if args.len() > 1 => idle,
         _ => {
             eprintln!("usage: gitnexus-mcp-idle <idle-seconds> <command> [args...]");
             exit(2);
@@ -49,6 +51,7 @@ fn main() {
     let mut server: Option<Server> = None;
     let mut generation = 0;
     let mut pending: HashSet<String> = HashSet::new();
+    let mut replaying: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut handshake: Vec<u8> = Vec::new();
     let mut last = Instant::now();
     loop {
@@ -84,6 +87,12 @@ fn main() {
                     Some("notifications/initialized") => handshake.extend_from_slice(&line),
                     Some("notifications/cancelled") => {
                         pending.remove(&message["params"]["requestId"].to_string());
+                        if message["params"]["requestId"] == REPLAY_ID {
+                            if let Some(queued) = replaying.get_mut(&generation) {
+                                queued.clear();
+                                continue;
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -97,20 +106,35 @@ fn main() {
                         generation += 1;
                         let started = server.insert(start(command, generation, &events));
                         if method != Some("initialize") {
+                            replaying.insert(generation, Vec::new());
                             // A failed write means the server exited; its stdout end then ends the launcher.
                             let _ = started.stdin.write_all(&handshake);
                         }
                         started
                     }
                 };
+                if request && message["id"] == REPLAY_ID {
+                    if let Some(queued) = replaying.get_mut(&running.generation) {
+                        queued.extend_from_slice(&line);
+                        continue;
+                    }
+                }
                 let _ = running.stdin.write_all(&line);
             }
-            Event::Server(_, Some(line)) => {
+            Event::Server(sent, Some(line)) => {
                 let message: Value = serde_json::from_slice(&line).unwrap_or_default();
-                if message["id"] == REPLAY_ID {
-                    continue;
-                }
                 if message.get("method").is_none() {
+                    if message["id"] == REPLAY_ID {
+                        if let Some(queued) = replaying.remove(&sent) {
+                            if !queued.is_empty() {
+                                let running = server
+                                    .as_mut()
+                                    .expect("queued request has an active worker");
+                                let _ = running.stdin.write_all(&queued);
+                            }
+                            continue;
+                        }
+                    }
                     pending.remove(&message["id"].to_string());
                 }
                 if out.write_all(&line).and_then(|()| out.flush()).is_err() {
@@ -118,17 +142,12 @@ fn main() {
                 }
             }
             Event::Server(ended, None) => {
+                replaying.remove(&ended);
                 if server
                     .as_ref()
                     .is_some_and(|running| running.generation == ended)
                 {
-                    let mut gone = server.take().expect("server is running").child;
-                    exit(
-                        gone.wait()
-                            .ok()
-                            .and_then(|status| status.code())
-                            .unwrap_or(1),
-                    );
+                    finish(server);
                 }
             }
             Event::Client(None) => finish(server),
