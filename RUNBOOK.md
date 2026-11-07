@@ -83,7 +83,7 @@ Restart the editor MCP session if needed. The server **refreshes the registry la
 
 **Symptom:** each agent thread keeps a `gitnexus mcp` process that holds 300–700 MB after its first query, until the thread ends.
 
-**Fix:** run the server through `gitnexus-mcp-idle`. It forwards stdio unchanged, stops the server after the idle period with no request open, and starts it again on the next request. An idle thread then holds the launcher only (under 1 MB). Workers must exit on stdin EOF. The first call after idle reopens the index. Build from the repository root on Linux x86-64:
+**Fix:** run the server through `gitnexus-mcp-idle`. It forwards stdio unchanged, stops the server after the idle period with no request open, and starts it again on the next request. An idle thread then holds the launcher only (under 1 MB). Workers must exit on stdin EOF and restore session state beyond the replayed initialize handshake. The first call after idle reopens the index. Build from the repository root on Linux x86-64:
 
 ```bash
 cargo build --release --target x86_64-unknown-linux-musl --manifest-path gitnexus-mcp-idle/Cargo.toml
