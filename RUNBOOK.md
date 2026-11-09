@@ -98,31 +98,6 @@ command = "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/
 args = ["30", "node", "/path/to/GitNexus/gitnexus/dist/cli/index.js", "mcp"]
 ```
 
-FFF needs the included `gitnexus-mcp-idle/fff-0.7.1.patch`. It targets **dmtrKovalenko/fff.nvim**, `crates/fff-mcp`, at commit `e8dd50ce5a6857f2dc7f827746163a4b1040ba9c` (0.7.1). It saves the existing bounded cursor store before replying. Restored workers wait for the full index; the first worker keeps upstream startup behavior. Search and ranking code stay unchanged.
-
-From that FFF checkout, with the Rust musl target, musl C compiler, libclang and Zig 0.16.0 (used by the `zlob` dependency) installed:
-
-```bash
-git apply /path/to/GitNexus/gitnexus-mcp-idle/fff-0.7.1.patch
-cargo rustc --locked --profile ci -p fff-mcp --target x86_64-unknown-linux-musl -- -C target-feature=+crt-static
-```
-
-The FFF launcher holds an anonymous file for cursor state across workers. The file disappears when the thread closes. Keep update checks disabled, as in this config:
-
-```toml
-[mcp_servers.fff]
-command = "/bin/sh"
-args = ["-c", '''set -eu
-state=$(mktemp)
-exec 3<>"$state"
-rm -- "$state"
-export FFF_MCP_CURSOR_STATE=/proc/self/fd/3
-exec "$@"
-''', "fff-idle", "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/release/gitnexus-mcp-idle", "30", "/path/to/fff/target/x86_64-unknown-linux-musl/ci/fff-mcp", "--no-update-check"]
-
-[mcp_servers.fff.env]
-MIMALLOC_ARENA_EAGER_COMMIT = "0"
-```
 
 ---
 
