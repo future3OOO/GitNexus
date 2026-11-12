@@ -19,6 +19,22 @@ use std::time::{Duration, Instant};
 
 const REPLAY_ID: &str = "gitnexus-mcp-idle:initialize";
 
+/// A request id as the server sees it. Node reads a numeric id as a double and
+/// echoes it in canonical form (`1.0` comes back as `1`), so numbers compare by
+/// value; any other id compares by its JSON text.
+#[derive(PartialEq, Eq, Hash)]
+enum Id {
+    Number(u64),
+    Text(String),
+}
+
+fn id(value: &Value) -> Id {
+    match value.as_f64() {
+        Some(number) => Id::Number((number + 0.0).to_bits()),
+        None => Id::Text(value.to_string()),
+    }
+}
+
 enum Event {
     Client(Option<Vec<u8>>),
     Server(u64, Option<Vec<u8>>),
@@ -50,7 +66,7 @@ fn main() {
     let mut out = std::io::stdout().lock();
     let mut server: Option<Server> = None;
     let mut generation = 0;
-    let mut pending: HashSet<String> = HashSet::new();
+    let mut pending: HashSet<Id> = HashSet::new();
     let mut replaying: HashMap<u64, Vec<u8>> = HashMap::new();
     let mut handshake: Vec<u8> = Vec::new();
     let mut last = Instant::now();
@@ -86,7 +102,7 @@ fn main() {
                     }
                     Some("notifications/initialized") => handshake.extend_from_slice(&line),
                     Some("notifications/cancelled") => {
-                        pending.remove(&message["params"]["requestId"].to_string());
+                        pending.remove(&id(&message["params"]["requestId"]));
                         if message["params"]["requestId"] == REPLAY_ID {
                             if let Some(queued) = replaying.get_mut(&generation) {
                                 queued.clear();
@@ -97,7 +113,7 @@ fn main() {
                     _ => {}
                 }
                 if request {
-                    pending.insert(message["id"].to_string());
+                    pending.insert(id(&message["id"]));
                 }
                 let running = match server.as_mut() {
                     Some(running) => running,
@@ -135,7 +151,7 @@ fn main() {
                             continue;
                         }
                     }
-                    pending.remove(&message["id"].to_string());
+                    pending.remove(&id(&message["id"]));
                 }
                 if out.write_all(&line).and_then(|()| out.flush()).is_err() {
                     finish(server);
