@@ -128,9 +128,7 @@ function closeOne(repoId: string): void {
   entry.closed = true;
 
   // Close available connections — fire-and-forget with .catch() to prevent
-  // unhandled rejections.  Native close() returns Promise<void> but can crash
-  // the N-API destructor on macOS/Windows; deferring to process exit lets
-  // dangerouslyIgnoreUnhandledErrors absorb the crash.
+  // unhandled rejections from the native close() Promise.
   for (const conn of entry.available) {
     conn.close().catch(() => {});
   }
@@ -321,6 +319,7 @@ async function doInitLbug(repoId: string, dbPath: string): Promise<void> {
   // the connection while the async FTS load is in progress.
   if (!shared.ftsLoaded) {
     try {
+      await available[0].query('INSTALL fts');
       await available[0].query('LOAD EXTENSION fts');
       shared.ftsLoaded = true;
     } catch {

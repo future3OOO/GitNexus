@@ -1,0 +1,8 @@
+[package]
+name = "gitnexus-mcp-idle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_json = { version = "1", features = ["float_roundtrip"] }

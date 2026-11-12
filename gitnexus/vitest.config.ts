@@ -9,12 +9,6 @@ export default defineConfig({
     pool: 'forks',
     globals: true,
     teardownTimeout: 3000,
-    // N-API destructors can crash worker forks on macOS during process exit.
-    // This is independent of the QueryResult lifetime fix in @ladybugdb/core 0.15.2 —
-    // it's a vitest forks + native addon interaction where destructors run in
-    // arbitrary order at exit. Tests themselves pass; only the exit crashes.
-    // TODO: remove once LadybugDB fixes all N-API destructor ordering issues.
-    dangerouslyIgnoreUnhandledErrors: true,
 
     // Coverage stays at root (not supported in project configs)
     coverage: {
@@ -38,12 +32,6 @@ export default defineConfig({
     // LadybugDB's native mmap addon causes file-lock conflicts when vitest
     // runs lbug test files in parallel forks on Windows.  The 'lbug-db'
     // project forces sequential execution (fileParallelism: false).
-    //
-    // Each file runs in its own fork — the fork exits after the file
-    // completes, triggering an N-API destructor segfault that is caught
-    // by dangerouslyIgnoreUnhandledErrors.  Tests themselves pass; only
-    // the exit crashes.  This is safer than isolate: false, which causes
-    // native state corruption after 2-3 open/close cycles in the same fork.
     projects: [
       {
         extends: true,

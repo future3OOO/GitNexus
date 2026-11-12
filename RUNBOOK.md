@@ -79,6 +79,29 @@ Restart the editor MCP session if needed. The server **refreshes the registry la
 
 ---
 
+## MCP: idle servers holding memory
+
+**Symptom:** each agent thread keeps a `gitnexus mcp` process that holds 300–700 MB after its first query, until the thread ends.
+
+**Fix:** run the server through `gitnexus-mcp-idle`. It forwards stdio unchanged, stops the server after the idle period with no request open, and starts it again on the next request. An idle thread then holds the launcher only (under 1 MB). Workers must exit on stdin EOF and restore session state beyond the replayed initialize handshake. The first call after idle reopens the index. With Rust/rustup and a C compiler installed, build from the repository root on Linux x86-64:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl --manifest-path gitnexus-mcp-idle/Cargo.toml
+```
+
+Codex (`~/.codex/config.toml`), with a 30 s idle period:
+
+```toml
+[mcp_servers.gitnexus]
+command = "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/release/gitnexus-mcp-idle"
+args = ["30", "node", "/path/to/GitNexus/gitnexus/dist/cli/index.js", "mcp"]
+```
+
+**Rollout order (Ladybug 0.15.2 → 0.17.1):** switch the installed copy and every reader (MCP servers, hooks, the CLI) to the new version together. Already-running MCP servers keep the version they loaded, so have their owners reload or restart them before any shared index is rebuilt. Indexes built by 0.17.1 use storage version 41, which 0.15.2 refuses to open; 0.17.1 reads existing version-40 indexes as they are, so they need no migration. Before the first 0.17.1 `analyze` of a repository, copy its version-40 `.gitnexus/lbug`: going back to 0.15.2 means restoring that copy, or re-indexing with the old version.
+
+---
+
 ## Clean slate (corrupt or huge `.gitnexus`)
 
 **Current repo only** (prompts for confirmation):
