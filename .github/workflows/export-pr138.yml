@@ -1,0 +1,20 @@
+name: export gitnexus
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: tar --exclude=.git -czf /tmp/gitnexus.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gitnexus-source
+          path: /tmp/gitnexus.tgz
+          retention-days: 1
