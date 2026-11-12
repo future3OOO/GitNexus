@@ -98,7 +98,7 @@ command = "/path/to/GitNexus/gitnexus-mcp-idle/target/x86_64-unknown-linux-musl/
 args = ["30", "node", "/path/to/GitNexus/gitnexus/dist/cli/index.js", "mcp"]
 ```
 
-**Rollout order (Ladybug 0.15.2 → 0.17.1):** switch the installed copy and every reader (MCP servers, hooks, the CLI) to the new version together. Indexes built by 0.17.1 use storage version 41, which 0.15.2 refuses to open; 0.17.1 reads existing version-40 indexes as they are, so they need no migration. Going back to 0.15.2 means re-indexing with the old version.
+**Rollout order (Ladybug 0.15.2 → 0.17.1):** switch the installed copy and every reader (MCP servers, hooks, the CLI) to the new version together. Already-running MCP servers keep the version they loaded, so have their owners reload or restart them before any shared index is rebuilt. Indexes built by 0.17.1 use storage version 41, which 0.15.2 refuses to open; 0.17.1 reads existing version-40 indexes as they are, so they need no migration. Before the first 0.17.1 `analyze` of a repository, copy its version-40 `.gitnexus/lbug`: going back to 0.15.2 means restoring that copy, or re-indexing with the old version.
 
 ---
 
