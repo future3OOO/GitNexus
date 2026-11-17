@@ -158,7 +158,13 @@ const doInitLbug = async (dbPath: string) => {
     }
   } catch (err) {
     const createdParent = await fs.mkdir(parentDir, { recursive: true });
-    if (!stat && !createdParent && dbPath && dbPath !== ':memory:' && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (
+      !stat &&
+      !createdParent &&
+      dbPath &&
+      dbPath !== ':memory:' &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
       // Only an on-disk database can leave an orphan checkpoint file.
       const checkpoint = `${dbPath}.wal.checkpoint`;
       try {
