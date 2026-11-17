@@ -1,5 +1,5 @@
 import fs from 'fs/promises';
-import { createReadStream } from 'fs';
+import { createReadStream, type Stats } from 'fs';
 import { createInterface } from 'readline';
 import path from 'path';
 import lbug from '@ladybugdb/core';
@@ -137,18 +137,16 @@ const doInitLbug = async (dbPath: string) => {
     ftsLoaded = false;
   }
 
-  // LadybugDB stores the database as a single file (not a directory).
-  // If the path already exists, it must be a valid LadybugDB database file.
-  // Remove stale empty directories or files from older versions.
+  const parentDir = path.dirname(dbPath);
+  let stat: Stats | undefined;
   try {
-    const stat = await fs.lstat(dbPath);
+    stat = await fs.lstat(dbPath);
     if (stat.isSymbolicLink()) {
       // Never follow symlinks — just remove the link itself
       await fs.unlink(dbPath);
     } else if (stat.isDirectory()) {
       // Verify path is within expected storage directory before deleting
       const realPath = await fs.realpath(dbPath);
-      const parentDir = path.dirname(dbPath);
       const realParent = await fs.realpath(parentDir);
       if (!realPath.startsWith(realParent + path.sep) && realPath !== realParent) {
         throw new Error(
@@ -158,14 +156,18 @@ const doInitLbug = async (dbPath: string) => {
       // Old-style directory database or empty leftover - remove it
       await fs.rm(dbPath, { recursive: true, force: true });
     }
-    // If it's a file, assume it's an existing LadybugDB database - LadybugDB will open it
-  } catch {
-    // Path doesn't exist, which is what LadybugDB wants for a new database
+  } catch (err) {
+    const createdParent = await fs.mkdir(parentDir, { recursive: true });
+    if (!stat && !createdParent && dbPath && dbPath !== ':memory:' && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Only an on-disk database can leave an orphan checkpoint file.
+      const checkpoint = `${dbPath}.wal.checkpoint`;
+      try {
+        if ((await fs.lstat(checkpoint)).isFile()) await fs.unlink(checkpoint);
+      } catch (checkpointError) {
+        if ((checkpointError as NodeJS.ErrnoException).code !== 'ENOENT') throw checkpointError;
+      }
+    }
   }
-
-  // Ensure parent directory exists
-  const parentDir = path.dirname(dbPath);
-  await fs.mkdir(parentDir, { recursive: true });
 
   db = new lbug.Database(dbPath);
   conn = new lbug.Connection(db);
