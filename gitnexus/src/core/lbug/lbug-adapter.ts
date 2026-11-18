@@ -1,8 +1,10 @@
 import fs from 'fs/promises';
-import { createReadStream } from 'fs';
+import { createReadStream, type Stats } from 'fs';
 import { createInterface } from 'readline';
 import path from 'path';
 import lbug from '@ladybugdb/core';
+import { getStoragePaths } from '../../storage/repo-manager.js';
+import { samePath } from '../../storage/paths.js';
 import { KnowledgeGraph } from '../graph/types.js';
 import {
   NODE_TABLES,
@@ -122,6 +124,28 @@ const ensureLbugInitialized = async (dbPath: string) => {
   return { db, conn };
 };
 
+const removeOrphanCheckpoint = async (dbPath: string, parentDir: string) => {
+  try {
+    if (!(await fs.lstat(`${dbPath}.wal.checkpoint`)).isFile()) return;
+    if ((await fs.lstat(parentDir)).isSymbolicLink()) {
+      const repo = path.dirname(path.resolve(parentDir));
+      if (!samePath(dbPath, getStoragePaths(repo).lbugPath)) return;
+      const [root, storage] = await Promise.all([fs.realpath(repo), fs.realpath(parentDir)]);
+      const relative = path.relative(root, storage);
+      if (!relative || relative.split(path.sep)[0] === '..' || path.isAbsolute(relative)) return;
+      // Pin both operations to the repository-owned target of the storage link.
+      dbPath = path.join(storage, path.basename(dbPath));
+    }
+    // Only the opener that creates the main file may remove its orphan.
+    // LadybugDB accepts an empty file and creates database files with mode 0644.
+    await fs.writeFile(dbPath, '', { flag: 'wx', mode: 0o644 });
+    await fs.unlink(`${dbPath}.wal.checkpoint`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'EEXIST') throw err;
+  }
+};
+
 const doInitLbug = async (dbPath: string) => {
   // Different database requested — close the old one first
   if (conn || db) {
@@ -137,18 +161,16 @@ const doInitLbug = async (dbPath: string) => {
     ftsLoaded = false;
   }
 
-  // LadybugDB stores the database as a single file (not a directory).
-  // If the path already exists, it must be a valid LadybugDB database file.
-  // Remove stale empty directories or files from older versions.
+  const parentDir = path.dirname(dbPath);
+  let stat: Stats | undefined;
   try {
-    const stat = await fs.lstat(dbPath);
+    stat = await fs.lstat(dbPath);
     if (stat.isSymbolicLink()) {
       // Never follow symlinks — just remove the link itself
       await fs.unlink(dbPath);
     } else if (stat.isDirectory()) {
       // Verify path is within expected storage directory before deleting
       const realPath = await fs.realpath(dbPath);
-      const parentDir = path.dirname(dbPath);
       const realParent = await fs.realpath(parentDir);
       if (!realPath.startsWith(realParent + path.sep) && realPath !== realParent) {
         throw new Error(
@@ -158,14 +180,18 @@ const doInitLbug = async (dbPath: string) => {
       // Old-style directory database or empty leftover - remove it
       await fs.rm(dbPath, { recursive: true, force: true });
     }
-    // If it's a file, assume it's an existing LadybugDB database - LadybugDB will open it
-  } catch {
-    // Path doesn't exist, which is what LadybugDB wants for a new database
+  } catch (err) {
+    const createdParent = await fs.mkdir(parentDir, { recursive: true });
+    if (
+      !stat &&
+      !createdParent &&
+      dbPath &&
+      dbPath !== ':memory:' &&
+      (err as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      await removeOrphanCheckpoint(dbPath, parentDir);
+    }
   }
-
-  // Ensure parent directory exists
-  const parentDir = path.dirname(dbPath);
-  await fs.mkdir(parentDir, { recursive: true });
 
   db = new lbug.Database(dbPath);
   conn = new lbug.Connection(db);
