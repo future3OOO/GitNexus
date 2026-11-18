@@ -3,6 +3,8 @@ import { createReadStream, type Stats } from 'fs';
 import { createInterface } from 'readline';
 import path from 'path';
 import lbug from '@ladybugdb/core';
+import { getStoragePaths } from '../../storage/repo-manager.js';
+import { samePath } from '../../storage/paths.js';
 import { KnowledgeGraph } from '../graph/types.js';
 import {
   NODE_TABLES,
@@ -122,6 +124,28 @@ const ensureLbugInitialized = async (dbPath: string) => {
   return { db, conn };
 };
 
+const removeOrphanCheckpoint = async (dbPath: string, parentDir: string) => {
+  try {
+    if (!(await fs.lstat(`${dbPath}.wal.checkpoint`)).isFile()) return;
+    if ((await fs.lstat(parentDir)).isSymbolicLink()) {
+      const repo = path.dirname(path.resolve(parentDir));
+      if (!samePath(dbPath, getStoragePaths(repo).lbugPath)) return;
+      const [root, storage] = await Promise.all([fs.realpath(repo), fs.realpath(parentDir)]);
+      const relative = path.relative(root, storage);
+      if (!relative || relative.split(path.sep)[0] === '..' || path.isAbsolute(relative)) return;
+      // Pin both operations to the repository-owned target of the storage link.
+      dbPath = path.join(storage, path.basename(dbPath));
+    }
+    // Only the opener that creates the main file may remove its orphan.
+    // LadybugDB accepts an empty file and creates database files with mode 0644.
+    await fs.writeFile(dbPath, '', { flag: 'wx', mode: 0o644 });
+    await fs.unlink(`${dbPath}.wal.checkpoint`);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT' && code !== 'EEXIST') throw err;
+  }
+};
+
 const doInitLbug = async (dbPath: string) => {
   // Different database requested — close the old one first
   if (conn || db) {
@@ -165,13 +189,7 @@ const doInitLbug = async (dbPath: string) => {
       dbPath !== ':memory:' &&
       (err as NodeJS.ErrnoException).code === 'ENOENT'
     ) {
-      // Only an on-disk database can leave an orphan checkpoint file.
-      const checkpoint = `${dbPath}.wal.checkpoint`;
-      try {
-        if ((await fs.lstat(checkpoint)).isFile()) await fs.unlink(checkpoint);
-      } catch (checkpointError) {
-        if ((checkpointError as NodeJS.ErrnoException).code !== 'ENOENT') throw checkpointError;
-      }
+      await removeOrphanCheckpoint(dbPath, parentDir);
     }
   }
 
